@@ -257,6 +257,32 @@ function getRecordGroupTitle(record) {
   return record.title || getRecordHost(record);
 }
 
+function getRecordIconText(record) {
+  const method = getLoginMethodMeta(getRecordLoginMethod(record));
+  if (method.short === "Google") return "G";
+  if (method.short === "GitHub") return "GH";
+  if (method.short === "Apple") return "A";
+  if (method.short === "微信") return "微";
+  if (method.short === "手机号") return "号";
+  const title = String(getRecordGroupTitle(record) || "").trim();
+  return title ? title.slice(0, 1).toUpperCase() : "〇";
+}
+
+function getRecordIconTone(record) {
+  const method = getLoginMethodMeta(getRecordLoginMethod(record));
+  if (method.short === "Google") return "google";
+  if (method.short === "GitHub") return "github";
+  if (method.short === "Apple") return "apple";
+  if (method.short === "微信") return "wechat";
+  if (method.short === "手机号") return "phone";
+  return "default";
+}
+
+function getRecordGroupedCount(record) {
+  // 同一标题和网址下可能有多个账号，详情区用这个数量提示用户别选错记录。
+  return state.records.filter((item) => getRecordGroupTitle(item) === getRecordGroupTitle(record) && item.url === record.url).length;
+}
+
 function getRecordBookmarkPath(record) {
   // 书签文件把分类放在第一层文件夹，剩余层级压进标签 / 环境。
   const category = normalizeCategory(record.category);
@@ -420,15 +446,24 @@ function renderGroupHeading(group, index) {
 }
 
 function renderRecordCard(record) {
-  const strength = scorePassword(record.password);
   const loginMethod = getLoginMethodMeta(getRecordLoginMethod(record));
+  const metaLine = [
+    record.username || "未设置账号",
+    getRecordAccountTag(record),
+    loginMethod.label,
+    record.category,
+    formatDate(record.updatedAt)
+  ].filter(Boolean).join(" · ");
   return `
     <button class="vault-card ${record.id === state.selectedId ? "is-active" : ""}" type="button" data-id="${record.id}" title="双击打开网址">
-      <div class="vault-card-title">
-        <strong>${escapeHtml(record.title)}</strong>
-        <span class="badge ${strength.className}">${escapeHtml(record.password ? strength.label : loginMethod.short)}</span>
+      <div class="vault-card-icon tone-${escapeHtml(getRecordIconTone(record))}" aria-hidden="true">${escapeHtml(getRecordIconText(record))}</div>
+      <div class="vault-card-body">
+        <div class="vault-card-title">
+          <strong>${escapeHtml(record.title)}</strong>
+          <span class="vault-card-time">${escapeHtml(formatDate(record.updatedAt))}</span>
+        </div>
+        <div class="vault-meta one-line">${escapeHtml(metaLine)}</div>
       </div>
-      <div class="vault-meta one-line">${escapeHtml(record.username || "未设置账号")} · ${escapeHtml(getRecordAccountTag(record))} · ${escapeHtml(loginMethod.label)} · ${escapeHtml(record.category)} · ${formatDate(record.updatedAt)}</div>
     </button>
   `;
 }
@@ -454,11 +489,21 @@ function renderDetail() {
     : `无密码（${loginMethod.label}）`;
   const passwordAction = record.password ? "toggle-password" : "";
   const passwordActionText = isPasswordVisible ? "🙈" : "👁";
+  const sameTitleCount = getRecordGroupedCount(record);
   els.detailPanel.innerHTML = `
     <div class="detail-header">
-      <div class="detail-title">
-        <p class="eyebrow">${escapeHtml(record.category)}</p>
-        <h3>${escapeHtml(record.title)}</h3>
+      <div class="detail-profile">
+        <div class="detail-avatar tone-${escapeHtml(getRecordIconTone(record))}" aria-hidden="true">${escapeHtml(getRecordIconText(record))}</div>
+        <div class="detail-title">
+          <div class="detail-title-row">
+            <h3>${escapeHtml(record.title)}</h3>
+            <span class="detail-title-badge">${escapeHtml(record.password ? strength.label : loginMethod.short)}</span>
+          </div>
+          <div class="detail-chip-row">
+            <span class="detail-chip">${escapeHtml(getRecordAccountTag(record))}</span>
+            <span class="detail-chip detail-chip-alt">${escapeHtml(loginMethod.label)}</span>
+          </div>
+        </div>
       </div>
       <div class="detail-actions">
         <button class="ghost-button" type="button" data-action="edit">编辑</button>
@@ -473,18 +518,24 @@ function renderDetail() {
       ${renderField("密码", passwordText, passwordAction, true, passwordActionText, "查看或隐藏密码", "icon-button")}
       <div class="field-row">
         <span>强度</span>
-        <div>
+        <div class="field-stack">
           <strong>${strength.label}</strong>
           <div class="strength-bar"><div class="strength-fill" style="width: ${strength.score}%"></div></div>
         </div>
       </div>
-      <div class="field-row">
+      <div class="insights-grid">
+        <article class="insight-card">
+          <span>最近更新</span>
+          <strong>${formatDate(record.updatedAt)}</strong>
+        </article>
+        <article class="insight-card">
+          <span>同标题账号</span>
+          <strong>${sameTitleCount} 个</strong>
+        </article>
+      </div>
+      <div class="field-row field-row-plain">
         <span>备注</span>
         <p>${escapeHtml(record.note || "无备注")}</p>
-      </div>
-      <div class="field-row">
-        <span>更新时间</span>
-        <p>${formatDate(record.updatedAt)}</p>
       </div>
     </div>
   `;
@@ -1094,7 +1145,7 @@ function createStarterRecords() {
       accountTag: "公司",
       password: "Change-Me-After-Login-2026!",
       loginMethod: "password",
-      category: "dev",
+      category: "开发工具",
       note: "示例数据：用于展示字段结构，正式使用前请删除或编辑。",
       createdAt: now,
       updatedAt: now
@@ -1107,7 +1158,7 @@ function createStarterRecords() {
       accountTag: "个人",
       password: "LocalVault#Example#18",
       loginMethod: "password",
-      category: "personal",
+      category: "个人账号",
       note: "支持记录账号、网址、二次验证说明和恢复码位置。",
       createdAt: now,
       updatedAt: now

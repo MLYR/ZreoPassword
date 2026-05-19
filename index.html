@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>小〇密码 - 本地密码工作台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230070eb'/%3E%3Ccircle cx='32' cy='32' r='12' fill='white'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
@@ -12,7 +13,7 @@
       <div class="brand">
         <div class="brand-mark" aria-hidden="true">〇</div>
         <div>
-          <p class="eyebrow">Local Vault</p>
+          <p class="eyebrow">本地密码库</p>
           <h1>小〇密码</h1>
         </div>
       </div>
@@ -26,22 +27,19 @@
 
       <div class="sidebar-footer">
         <button class="ghost-button" id="settingsButton" type="button">设置</button>
+        <button class="ghost-button" id="lockButton" type="button">锁定</button>
       </div>
     </aside>
 
     <main class="workspace">
       <header class="topbar">
         <div>
-          <p class="eyebrow">Personal Password Vault</p>
-          <h2>本地优先的密码管理网页系统</h2>
+          <p class="eyebrow">个人密码库</p>
+          <h2>本地优先的密码管理界面</h2>
         </div>
 
         <div class="topbar-actions">
-          <div class="search-box">
-            <span aria-hidden="true">⌘K</span>
-            <input id="searchInput" type="search" placeholder="搜索标题、账号、网址、备注">
-          </div>
-          <button class="icon-button" id="lockButton" type="button" title="锁定密码库" aria-label="锁定密码库">🔒</button>
+          <span>本地加密，离线可用</span>
         </div>
       </header>
 
@@ -67,9 +65,9 @@
       <section class="content-grid">
         <div class="vault-list-panel">
           <div class="panel-heading">
-            <div>
-              <p class="eyebrow">Dashboard</p>
-              <h3>密码记录</h3>
+            <div class="search-box">
+              <span aria-hidden="true">⌘K</span>
+              <input id="searchInput" type="search" placeholder="搜索标题、账号、网址、备注">
             </div>
             <select id="sortSelect" aria-label="排序方式">
               <option value="updatedDesc">最近更新</option>
@@ -97,7 +95,7 @@
       <div class="brand auth-brand">
         <div class="brand-mark" aria-hidden="true">〇</div>
         <div>
-          <p class="eyebrow">AES-GCM Local Vault</p>
+          <p class="eyebrow">AES-GCM 本地加密</p>
           <h1 id="authTitle">创建主密码</h1>
         </div>
       </div>
@@ -121,7 +119,7 @@
     <form id="itemForm" method="dialog">
       <div class="dialog-heading">
         <div>
-          <p class="eyebrow">Vault Item</p>
+          <p class="eyebrow">记录编辑</p>
           <h3 id="dialogTitle">新建记录</h3>
         </div>
         <button class="icon-button" id="closeDialogButton" type="button" aria-label="关闭">×</button>
@@ -134,7 +132,7 @@
         </label>
         <label>
           分类
-          <input id="categoryInput" name="category" type="text" placeholder="dev" list="categoryOptions">
+          <input id="categoryInput" name="category" type="text" placeholder="开发工具" list="categoryOptions">
           <datalist id="categoryOptions"></datalist>
         </label>
         <label>
@@ -200,7 +198,7 @@
     <form id="settingsForm" method="dialog">
       <div class="dialog-heading">
         <div>
-          <p class="eyebrow">Settings</p>
+          <p class="eyebrow">设置中心</p>
           <h3>设置</h3>
         </div>
         <button class="icon-button" id="closeSettingsButton" type="button" aria-label="关闭">×</button>

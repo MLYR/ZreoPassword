@@ -3,14 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "main": "electron/main.cjs",
-  "description": "Personal Password Vault desktop framework",
+  "description": "小〇密码本地桌面密码管理框架",
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
-    "dist:mac": "electron-builder --mac",
-    "dist:win": "electron-builder --win"
+    "dist:mac": "electron-builder --mac --arm64",
+    "dist:win": "electron-builder --win --x64",
+    "dist:win:arm64": "electron-builder --win --arm64",
+    "dist:all": "npm run dist:mac && npm run dist:win"
   },
   "build": {
     "appId": "com.zreo.password",
