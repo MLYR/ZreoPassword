@@ -146,6 +146,10 @@
           <input id="usernameInput" name="username" type="text" placeholder="admin" autocomplete="username">
         </label>
         <label>
+          标签 / 环境
+          <input id="accountTagInput" name="accountTag" type="text" placeholder="个人 / 公司 / 测试 / 客户A">
+        </label>
+        <label>
           登录方式
           <select id="loginMethodInput" name="loginMethod">
             <option value="password">账号密码</option>
@@ -153,6 +157,7 @@
             <option value="wechat">微信登录</option>
             <option value="github">GitHub 登录</option>
             <option value="apple">Apple 登录</option>
+            <option value="phone">手机号登录</option>
             <option value="other">其他方式</option>
           </select>
         </label>
@@ -202,14 +207,15 @@
       </div>
 
       <section class="settings-section">
-        <h4>备份</h4>
+        <h4>书签</h4>
         <div class="settings-actions">
-          <button class="ghost-button" id="exportButton" type="button">导出加密备份</button>
+          <button class="ghost-button" id="exportButton" type="button">导出书签 HTML</button>
           <label class="ghost-button file-button">
-            导入备份
-            <input id="importInput" type="file" accept="application/json">
+            导入书签 HTML
+            <input id="importInput" type="file" accept=".html,.htm,text/html,application/json,.json">
           </label>
         </div>
+        <p class="settings-note">书签文件不包含密码，密码继续只保存在本地加密库里。</p>
       </section>
 
       <section class="settings-section">

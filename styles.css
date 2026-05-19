@@ -314,10 +314,55 @@ button {
 
 .vault-list {
   display: grid;
-  gap: 10px;
+  gap: 14px;
   max-height: calc(100vh - 260px);
   padding: 16px;
   overflow: auto;
+}
+
+.record-group {
+  display: grid;
+  gap: 8px;
+}
+
+.group-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 0 4px;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  font-size: 13px;
+  text-align: left;
+}
+
+.group-heading strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-heading span {
+  flex: 0 0 auto;
+}
+
+.group-toggle {
+  min-height: 30px;
+  border-radius: 8px;
+}
+
+.group-toggle:hover {
+  background: var(--panel-muted);
+}
+
+.group-records {
+  display: grid;
+  gap: 8px;
 }
 
 .vault-card {
@@ -380,6 +425,12 @@ button {
 .vault-meta {
   color: var(--muted);
   font-size: 13px;
+}
+
+.vault-meta.one-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .detail-panel {
@@ -463,6 +514,12 @@ button {
 
 .field-row a {
   text-decoration: none;
+}
+
+.field-row .icon-button {
+  min-height: 34px;
+  width: 34px;
+  font-size: 14px;
 }
 
 .strength-bar {

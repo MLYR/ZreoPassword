@@ -2,11 +2,13 @@ const STORAGE_KEY = "zreo-password-vault-v1";
 const SESSION_KEY = "zreo-password-session-key";
 const SESSION_PASSWORD_KEY = "zreo-password-session-master";
 const DEFAULT_CATEGORY = "未分类";
+const MAX_BOOKMARK_HTML_BYTES = 20 * 1024 * 1024;
 
 const state = {
   records: [],
   selectedId: null,
   visiblePasswordIds: new Set(),
+  expandedGroups: new Set(),
   lastListClick: { id: null, time: 0 },
   activeCategory: "全部",
   key: null,
@@ -49,6 +51,7 @@ const els = {
   categoryOptions: document.querySelector("#categoryOptions"),
   urlInput: document.querySelector("#urlInput"),
   usernameInput: document.querySelector("#usernameInput"),
+  accountTagInput: document.querySelector("#accountTagInput"),
   loginMethodInput: document.querySelector("#loginMethodInput"),
   passwordInput: document.querySelector("#passwordInput"),
   toggleFormPasswordButton: document.querySelector("#toggleFormPasswordButton"),
@@ -232,6 +235,7 @@ function getLoginMethodMeta(method) {
     wechat: { label: "微信登录", short: "微信" },
     github: { label: "GitHub 登录", short: "GitHub" },
     apple: { label: "Apple 登录", short: "Apple" },
+    phone: { label: "手机号登录", short: "手机号" },
     other: { label: "其他方式", short: "其他" }
   };
   return map[method] || map.password;
@@ -239,6 +243,53 @@ function getLoginMethodMeta(method) {
 
 function getRecordLoginMethod(record) {
   return record.loginMethod || (record.password ? "password" : "other");
+}
+
+function getRecordHost(record) {
+  return getHost(record.url) || "未设置网址";
+}
+
+function getRecordAccountTag(record) {
+  return record.accountTag || "默认";
+}
+
+function getRecordGroupTitle(record) {
+  return record.title || getRecordHost(record);
+}
+
+function getRecordBookmarkPath(record) {
+  // 书签文件把分类放在第一层文件夹，剩余层级压进标签 / 环境。
+  const category = normalizeCategory(record.category);
+  const extraSegments = splitBookmarkPath(record.accountTag);
+  return [category, ...extraSegments].filter(Boolean);
+}
+
+function splitBookmarkPath(pathValue) {
+  return String(pathValue ?? "")
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+}
+
+function joinBookmarkPath(segments) {
+  return segments.filter(Boolean).join("/");
+}
+
+function normalizeBookmarkTitle(title, url) {
+  const cleanedTitle = String(title ?? "").trim();
+  if (cleanedTitle) {
+    return cleanedTitle;
+  }
+  return getHost(url) || "未命名";
+}
+
+function recordImportKey(record) {
+  return [
+    String(record.title ?? "").trim().toLowerCase(),
+    String(record.url ?? "").trim().toLowerCase(),
+    normalizeCategory(record.category).toLowerCase(),
+    String(record.accountTag ?? "").trim().toLowerCase()
+  ].join("|");
 }
 
 function getFilteredRecords() {
@@ -251,6 +302,7 @@ function getFilteredRecords() {
         record.title,
         record.url,
         record.username,
+        record.accountTag,
         record.category,
         getLoginMethodMeta(getRecordLoginMethod(record)).label,
         record.note
@@ -266,6 +318,26 @@ function getFilteredRecords() {
       }
       return new Date(b.updatedAt) - new Date(a.updatedAt);
     });
+}
+
+function groupRecordsByTitle(records) {
+  const groups = new Map();
+  records.forEach((record) => {
+    const title = getRecordGroupTitle(record);
+    if (!groups.has(title)) {
+      groups.set(title, []);
+    }
+    groups.get(title).push(record);
+  });
+  return [...groups.entries()].map(([title, items]) => ({ title, items }));
+}
+
+function shouldExpandRecordGroup(group) {
+  if (group.items.length <= 1) {
+    return true;
+  }
+  return state.expandedGroups.has(group.title)
+    || group.items.some((record) => record.id === state.selectedId);
 }
 
 function getCategoryCounts() {
@@ -316,20 +388,49 @@ function renderList() {
     return;
   }
 
-  els.vaultList.innerHTML = records.map((record) => {
-    const strength = scorePassword(record.password);
-    const loginMethod = getLoginMethodMeta(getRecordLoginMethod(record));
-    return `
-      <button class="vault-card ${record.id === state.selectedId ? "is-active" : ""}" type="button" data-id="${record.id}" title="双击打开网址">
-        <div class="vault-card-title">
-          <strong>${escapeHtml(record.title)}</strong>
-          <span class="badge ${strength.className}">${escapeHtml(record.password ? strength.label : loginMethod.short)}</span>
+  els.vaultList.innerHTML = groupRecordsByTitle(records).map((group, index) => `
+    <section class="record-group">
+      ${renderGroupHeading(group, index)}
+      ${shouldExpandRecordGroup(group) ? `
+        <div class="group-records">
+          ${group.items.map(renderRecordCard).join("")}
         </div>
-        <div class="vault-meta">${escapeHtml(record.username || "未设置账号")} · ${escapeHtml(record.category)} · ${escapeHtml(loginMethod.label)}</div>
-        <div class="vault-meta">${escapeHtml(getHost(record.url) || "未设置网址")} · ${formatDate(record.updatedAt)}</div>
-      </button>
+      ` : ""}
+    </section>
+  `).join("");
+}
+
+function renderGroupHeading(group, index) {
+  const isExpanded = shouldExpandRecordGroup(group);
+  if (group.items.length <= 1) {
+    return `
+      <div class="group-heading">
+        <strong>${escapeHtml(group.title)}</strong>
+        <span>${group.items.length} 个账号</span>
+      </div>
     `;
-  }).join("");
+  }
+
+  return `
+    <button class="group-heading group-toggle" type="button" data-group-index="${index}">
+      <strong>${escapeHtml(group.title)}</strong>
+      <span>${isExpanded ? "收起" : "展开"} · ${group.items.length} 个账号</span>
+    </button>
+  `;
+}
+
+function renderRecordCard(record) {
+  const strength = scorePassword(record.password);
+  const loginMethod = getLoginMethodMeta(getRecordLoginMethod(record));
+  return `
+    <button class="vault-card ${record.id === state.selectedId ? "is-active" : ""}" type="button" data-id="${record.id}" title="双击打开网址">
+      <div class="vault-card-title">
+        <strong>${escapeHtml(record.title)}</strong>
+        <span class="badge ${strength.className}">${escapeHtml(record.password ? strength.label : loginMethod.short)}</span>
+      </div>
+      <div class="vault-meta one-line">${escapeHtml(record.username || "未设置账号")} · ${escapeHtml(getRecordAccountTag(record))} · ${escapeHtml(loginMethod.label)} · ${escapeHtml(record.category)} · ${formatDate(record.updatedAt)}</div>
+    </button>
+  `;
 }
 
 function renderDetail() {
@@ -352,6 +453,7 @@ function renderDetail() {
     ? (isPasswordVisible ? record.password : "•".repeat(Math.min(record.password.length, 24)))
     : `无密码（${loginMethod.label}）`;
   const passwordAction = record.password ? "toggle-password" : "";
+  const passwordActionText = isPasswordVisible ? "🙈" : "👁";
   els.detailPanel.innerHTML = `
     <div class="detail-header">
       <div class="detail-title">
@@ -368,7 +470,7 @@ function renderDetail() {
       ${renderField("用户名", record.username || "未设置", "copy-username")}
       ${renderField("登录方式", loginMethod.label, "")}
       ${renderUrlField(record.url)}
-      ${renderField("密码", passwordText, passwordAction, true, isPasswordVisible ? "隐藏" : "查看")}
+      ${renderField("密码", passwordText, passwordAction, true, passwordActionText, "查看或隐藏密码", "icon-button")}
       <div class="field-row">
         <span>强度</span>
         <div>
@@ -388,10 +490,10 @@ function renderDetail() {
   `;
 }
 
-function renderField(label, value, action, isCode = false, actionText = "复制") {
+function renderField(label, value, action, isCode = false, actionText = "复制", actionLabel = actionText, buttonClass = "ghost-button") {
   const body = isCode ? `<code>${escapeHtml(value)}</code>` : `<p>${escapeHtml(value)}</p>`;
   const button = action
-    ? `<button class="ghost-button" type="button" data-action="${action}">${actionText}</button>`
+    ? `<button class="${buttonClass}" type="button" data-action="${action}" aria-label="${escapeHtml(actionLabel)}">${actionText}</button>`
     : "";
   return `
     <div class="field-row">
@@ -411,7 +513,6 @@ function renderUrlField(url) {
     <div class="field-row">
       <span>网址</span>
       ${link}
-      <button class="ghost-button" type="button" data-action="copy-url">复制</button>
     </div>
   `;
 }
@@ -430,6 +531,18 @@ function openRecordUrl(record) {
 
   try {
     const url = new URL(record.url);
+    if (window.desktopBridge?.openExternal) {
+      window.desktopBridge.openExternal(url.href)
+        .then((result) => {
+          if (!result || result.ok === false) {
+            window.open(url.href, "_blank", "noopener");
+          }
+        })
+        .catch(() => {
+          window.open(url.href, "_blank", "noopener");
+        });
+      return;
+    }
     window.open(url.href, "_blank", "noopener");
   } catch {
     showToast("网址格式不正确，先编辑一下再跳转");
@@ -467,6 +580,7 @@ function openEditDialog(record) {
   els.categoryInput.value = record.category;
   els.urlInput.value = record.url || "";
   els.usernameInput.value = record.username || "";
+  els.accountTagInput.value = record.accountTag || "";
   els.loginMethodInput.value = getRecordLoginMethod(record);
   els.passwordInput.value = record.password || "";
   els.noteInput.value = record.note || "";
@@ -483,6 +597,7 @@ async function saveRecord(event) {
     category: normalizeCategory(els.categoryInput.value),
     url: els.urlInput.value.trim(),
     username: els.usernameInput.value.trim(),
+    accountTag: els.accountTagInput.value.trim(),
     loginMethod: els.loginMethodInput.value,
     password: els.passwordInput.value,
     note: els.noteInput.value.trim(),
@@ -659,42 +774,313 @@ function lockVault() {
   els.masterPasswordInput.focus();
 }
 
-function exportVault() {
-  const vault = localStorage.getItem(STORAGE_KEY);
-  if (!vault) {
-    showToast("还没有可导出的密码库");
-    return;
-  }
-
-  const blob = new Blob([vault], { type: "application/json;charset=UTF-8" });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = `zreo-password-backup-${new Date().toISOString().slice(0, 10)}.json`;
-  anchor.click();
-  URL.revokeObjectURL(url);
-  showToast("已导出加密备份");
+function openSettingsDialog() {
+  els.settingsMessage.textContent = "";
+  els.currentMasterPasswordInput.value = "";
+  els.newMasterPasswordInput.value = "";
+  els.confirmNewMasterPasswordInput.value = "";
+  els.settingsDialog.showModal();
 }
 
-async function importVault(event) {
+async function exportBookmarksHtml() {
+  try {
+    const exportableRecords = state.records.filter((record) => String(record.url ?? "").trim());
+    if (!exportableRecords.length) {
+      showToast("还没有可导出的书签网址");
+      return;
+    }
+
+    const html = buildBookmarkHtml(exportableRecords);
+    const fileName = `zreo-bookmarks-${new Date().toISOString().slice(0, 10)}.html`;
+    if (window.desktopBridge?.saveTextFile) {
+      const result = await window.desktopBridge.saveTextFile({
+        title: "导出书签 HTML",
+        defaultPath: fileName,
+        mimeType: "text/html",
+        content: html
+      });
+      if (!result || result.canceled) {
+        return;
+      }
+      showToast(`已导出 ${exportableRecords.length} 条书签`);
+      return;
+    }
+
+    const blob = new Blob([html], { type: "text/html;charset=UTF-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    showToast(`已导出 ${exportableRecords.length} 条书签`);
+  } catch (error) {
+    console.error(error);
+    showToast("导出失败：请检查桌面端保存权限");
+  }
+}
+
+async function importBookmarksText(text) {
+  try {
+    const trimmed = String(text ?? "").trim();
+
+    if (!trimmed) {
+      throw new Error("No bookmarks found");
+    }
+
+    if (trimmed.startsWith("{")) {
+      const vault = JSON.parse(trimmed);
+      if (!vault.salt || !vault.iv || !vault.content) {
+        throw new Error("Invalid vault");
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(vault));
+      showToast("旧版加密备份已导入，请用对应主密码解锁");
+      lockVault();
+      return true;
+    }
+
+    const importedRecords = parseBookmarkHtml(text);
+    if (!importedRecords.length) {
+      throw new Error("No bookmarks found");
+    }
+
+    const now = new Date().toISOString();
+    const existingRecords = [...state.records];
+    const existingByKey = new Map(existingRecords.map((record) => [recordImportKey(record), record]));
+    const stagedByKey = new Map();
+    const appendedRecords = [];
+
+    importedRecords.forEach((item) => {
+      const record = createRecordFromBookmarkItem(item, now);
+      const key = recordImportKey(record);
+      const current = existingByKey.get(key) || stagedByKey.get(key);
+      if (current) {
+        // 同标题 + 同网址 + 同标签则合并到已有记录，密码继续保留在本地库。
+        current.title = record.title;
+        current.url = record.url;
+        current.category = record.category;
+        current.accountTag = record.accountTag;
+        current.updatedAt = now;
+        return;
+      }
+
+      stagedByKey.set(key, record);
+      appendedRecords.push(record);
+    });
+
+    state.records = appendedRecords.length ? [...existingRecords, ...appendedRecords] : existingRecords;
+
+    await persistRecords();
+    if (appendedRecords.length) {
+      state.selectedId = appendedRecords[0].id;
+    } else if (!state.records.some((record) => record.id === state.selectedId)) {
+      state.selectedId = state.records[0] ? state.records[0].id : null;
+    }
+    render();
+    showToast(`已导入 ${importedRecords.length} 条书签`);
+    return true;
+  } catch (error) {
+    console.error(error);
+    if (error && error.message === "File too large") {
+      showToast("导入失败：书签文件太大了");
+    } else if (error && error.message === "No bookmarks found") {
+      showToast("导入失败：没有识别到书签内容");
+    } else if (error && error.message === "Invalid vault") {
+      showToast("导入失败：旧版加密备份格式不正确");
+    } else {
+      showToast("导入失败：请确认是 Google/Chrome 导出的书签 HTML");
+    }
+    return false;
+  }
+}
+
+async function importBookmarksHtml(event) {
   const file = event.target.files[0];
   if (!file) return;
 
   try {
-    const text = await file.text();
-    const vault = JSON.parse(text);
-    if (!vault.salt || !vault.iv || !vault.content) {
-      throw new Error("Invalid vault");
+    if (file.size > MAX_BOOKMARK_HTML_BYTES) {
+      throw new Error("File too large");
     }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(vault));
-    showToast("备份已导入，请用对应主密码解锁");
-    lockVault();
+
+    const text = await file.text();
+    await importBookmarksText(text);
   } catch (error) {
     console.error(error);
-    showToast("导入失败：备份文件格式不正确");
+    if (error && error.message === "File too large") {
+      showToast("导入失败：书签文件太大了");
+    } else {
+      showToast("导入失败：请确认是 Google/Chrome 导出的书签 HTML");
+    }
   } finally {
     event.target.value = "";
   }
+}
+
+async function importBookmarksFromDesktop() {
+  if (!window.desktopBridge?.pickFile || !window.desktopBridge?.readTextFile) {
+    els.importInput.click();
+    return;
+  }
+
+  try {
+    const result = await window.desktopBridge.pickFile({
+      title: "导入书签 HTML",
+      filters: [
+        { name: "HTML", extensions: ["html", "htm"] },
+        { name: "JSON", extensions: ["json"] },
+        { name: "All Files", extensions: ["*"] }
+      ]
+    });
+    if (!result || result.canceled || !result.filePaths?.length) {
+      return;
+    }
+
+    const fileResult = await window.desktopBridge.readTextFile({
+      filePath: result.filePaths[0],
+      maxBytes: MAX_BOOKMARK_HTML_BYTES
+    });
+    if (!fileResult || fileResult.canceled || typeof fileResult.content !== "string") {
+      if (fileResult && fileResult.tooLarge) {
+        showToast("导入失败：书签文件太大了");
+      }
+      return;
+    }
+
+    await importBookmarksText(fileResult.content);
+  } catch (error) {
+    console.error(error);
+    showToast("导入失败：无法读取所选文件");
+  }
+}
+
+function buildBookmarkHtml(records) {
+  const now = Math.floor(Date.now() / 1000);
+  const tree = buildBookmarkTree(records);
+  const body = serializeBookmarkTree(tree, 1, now);
+  return [
+    "<!DOCTYPE NETSCAPE-Bookmark-file-1>",
+    "<!-- This file was generated by 小〇密码 -->",
+    '<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">',
+    "<TITLE>Bookmarks</TITLE>",
+    "<H1>Bookmarks</H1>",
+    "<DL><p>",
+    body,
+    "</DL><p>"
+  ].join("\n");
+}
+
+function buildBookmarkTree(records) {
+  // 以文件夹树组织导出内容，便于 Chrome / Google 直接识别。
+  const root = {
+    folders: new Map(),
+    bookmarks: []
+  };
+
+  records.forEach((record) => {
+    const pathSegments = getRecordBookmarkPath(record);
+    let current = root;
+    pathSegments.forEach((segment) => {
+      if (!current.folders.has(segment)) {
+        current.folders.set(segment, { folders: new Map(), bookmarks: [] });
+      }
+      current = current.folders.get(segment);
+    });
+    current.bookmarks.push(record);
+  });
+
+  return root;
+}
+
+function serializeBookmarkTree(node, depth, timestamp) {
+  const indent = "  ".repeat(depth);
+  const lines = [];
+
+  for (const [folderName, child] of node.folders.entries()) {
+    lines.push(`${indent}<DT><H3 ADD_DATE="${timestamp}" LAST_MODIFIED="${timestamp}">${escapeHtml(folderName)}</H3>`);
+    lines.push(`${indent}<DL><p>`);
+    lines.push(serializeBookmarkTree(child, depth + 1, timestamp));
+    lines.push(`${indent}</DL><p>`);
+  }
+
+  for (const record of node.bookmarks) {
+    if (!record.url) continue;
+    const title = normalizeBookmarkTitle(record.title, record.url);
+    lines.push(`${indent}<DT><A HREF="${escapeHtml(record.url)}" ADD_DATE="${timestamp}" LAST_MODIFIED="${timestamp}">${escapeHtml(title)}</A>`);
+  }
+
+  return lines.join("\n");
+}
+
+function parseBookmarkHtml(text) {
+  // 按 Netscape Bookmark HTML 递归解析文件夹和链接。
+  const doc = new DOMParser().parseFromString(text, "text/html");
+  if (!doc || doc.querySelector("parsererror")) {
+    throw new Error("Invalid bookmark HTML");
+  }
+
+  const rootDl = doc.querySelector("dl");
+  if (!rootDl) {
+    throw new Error("Invalid bookmark HTML");
+  }
+
+  const items = [];
+  walkBookmarkDl(rootDl, [], items);
+  return items;
+}
+
+function walkBookmarkDl(dlElement, folderSegments, items) {
+  const dtNodes = Array.from(dlElement.children).filter((node) => node.tagName === "DT");
+
+  dtNodes.forEach((dtNode) => {
+    const directChildren = Array.from(dtNode.children);
+    const folderNode = directChildren.find((node) => node.tagName === "H3" || node.tagName === "H4");
+    const linkNode = directChildren.find((node) => node.tagName === "A");
+    const nestedDlNode = directChildren.find((node) => node.tagName === "DL");
+
+    if (folderNode) {
+      const folderName = folderNode.textContent.trim();
+      const nextSegments = folderName ? [...folderSegments, folderName] : folderSegments;
+      if (nestedDlNode) {
+        walkBookmarkDl(nestedDlNode, nextSegments, items);
+      }
+      return;
+    }
+
+    if (!linkNode) {
+      return;
+    }
+
+    const url = (linkNode.getAttribute("href") || "").trim();
+    if (!url) {
+      return;
+    }
+
+    items.push({
+      title: normalizeBookmarkTitle(linkNode.textContent, url),
+      url,
+      folderPath: folderSegments.slice()
+    });
+  });
+}
+
+function createRecordFromBookmarkItem(item, now) {
+  const folderPath = Array.isArray(item.folderPath) ? item.folderPath.filter(Boolean) : [];
+  const category = normalizeCategory(folderPath[0] || DEFAULT_CATEGORY);
+  const accountTag = joinBookmarkPath(folderPath.slice(1));
+  return {
+    id: createId(),
+    title: normalizeBookmarkTitle(item.title, item.url),
+    url: item.url,
+    username: "",
+    accountTag,
+    loginMethod: "other",
+    category,
+    password: "",
+    note: "",
+    createdAt: now,
+    updatedAt: now
+  };
 }
 
 function createStarterRecords() {
@@ -705,6 +1091,7 @@ function createStarterRecords() {
       title: "GitHub",
       url: "https://github.com",
       username: "admin",
+      accountTag: "公司",
       password: "Change-Me-After-Login-2026!",
       loginMethod: "password",
       category: "dev",
@@ -717,6 +1104,7 @@ function createStarterRecords() {
       title: "Gmail",
       url: "https://mail.google.com",
       username: "example@gmail.com",
+      accountTag: "个人",
       password: "LocalVault#Example#18",
       loginMethod: "password",
       category: "personal",
@@ -762,18 +1150,18 @@ function bindEvents() {
   els.closeDialogButton.addEventListener("click", () => els.itemDialog.close());
   els.cancelButton.addEventListener("click", () => els.itemDialog.close());
   els.deleteButton.addEventListener("click", deleteSelectedRecord);
-  els.settingsButton.addEventListener("click", () => {
-    els.settingsMessage.textContent = "";
-    els.currentMasterPasswordInput.value = "";
-    els.newMasterPasswordInput.value = "";
-    els.confirmNewMasterPasswordInput.value = "";
-    els.settingsDialog.showModal();
-  });
+  els.settingsButton.addEventListener("click", openSettingsDialog);
   els.closeSettingsButton.addEventListener("click", () => els.settingsDialog.close());
   els.changeMasterPasswordButton.addEventListener("click", changeMasterPassword);
   els.generateButton.addEventListener("click", generatePassword);
   els.toggleFormPasswordButton.addEventListener("click", () => {
     setFormPasswordVisibility(els.passwordInput.type === "password");
+  });
+  els.loginMethodInput.addEventListener("change", () => {
+    if (els.loginMethodInput.value === "phone" && !els.noteInput.value.trim()) {
+      els.noteInput.value = "手机号：";
+      els.noteInput.focus();
+    }
   });
   els.lengthInput.addEventListener("input", () => {
     els.lengthValue.textContent = els.lengthInput.value;
@@ -781,8 +1169,30 @@ function bindEvents() {
   els.searchInput.addEventListener("input", render);
   els.sortSelect.addEventListener("change", render);
   els.lockButton.addEventListener("click", lockVault);
-  els.exportButton.addEventListener("click", exportVault);
-  els.importInput.addEventListener("change", importVault);
+  els.exportButton.addEventListener("click", exportBookmarksHtml);
+  els.importInput.addEventListener("change", importBookmarksHtml);
+
+  if (window.desktopBridge?.onAction) {
+    const detachDesktopActionListener = window.desktopBridge.onAction((action) => {
+      if (action === "open-settings") {
+        openSettingsDialog();
+      } else if (action === "export-bookmarks") {
+        exportBookmarksHtml();
+      } else if (action === "import-bookmarks") {
+        importBookmarksFromDesktop();
+      } else if (action === "lock-vault") {
+        lockVault();
+      } else if (action === "new-record") {
+        openCreateDialog();
+      }
+    });
+
+    window.addEventListener("beforeunload", () => {
+      if (typeof detachDesktopActionListener === "function") {
+        detachDesktopActionListener();
+      }
+    });
+  }
 
   els.categoryList.addEventListener("click", (event) => {
     const button = event.target.closest("[data-category]");
@@ -792,6 +1202,21 @@ function bindEvents() {
   });
 
   els.vaultList.addEventListener("click", (event) => {
+    const groupToggle = event.target.closest("[data-group-index]");
+    if (groupToggle) {
+      const records = getFilteredRecords();
+      const group = groupRecordsByTitle(records)[Number(groupToggle.dataset.groupIndex)];
+      if (!group) return;
+      const title = group.title;
+      if (state.expandedGroups.has(title)) {
+        state.expandedGroups.delete(title);
+      } else {
+        state.expandedGroups.add(title);
+      }
+      renderList();
+      return;
+    }
+
     const card = event.target.closest("[data-id]");
     if (!card) return;
     const now = Date.now();
@@ -815,7 +1240,6 @@ function bindEvents() {
     if (action === "edit") openEditDialog(record);
     if (action === "copy-password") await copyToClipboard(record.password, "密码已复制");
     if (action === "copy-username") await copyToClipboard(record.username, "用户名已复制");
-    if (action === "copy-url") await copyToClipboard(record.url, "网址已复制");
     if (action === "toggle-password") {
       if (state.visiblePasswordIds.has(record.id)) {
         state.visiblePasswordIds.delete(record.id);
