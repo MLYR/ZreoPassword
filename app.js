@@ -1090,8 +1090,15 @@ function walkBookmarkDl(dlElement, folderSegments, items) {
     const nestedDlNode = directChildren.find((node) => node.tagName === "DL");
 
     if (folderNode) {
-      const folderName = folderNode.textContent.trim();
-      const nextSegments = folderName ? [...folderSegments, folderName] : folderSegments;
+      const isToolbar = folderNode.getAttribute && folderNode.getAttribute("PERSONAL_TOOLBAR_FOLDER") === "true";
+      let nextSegments;
+      if (isToolbar) {
+        // 跳过 Google Chrome 的"书签栏"，子文件夹直升为路径根
+        nextSegments = folderSegments;
+      } else {
+        const folderName = folderNode.textContent.trim();
+        nextSegments = folderName ? [...folderSegments, folderName] : folderSegments;
+      }
       if (nestedDlNode) {
         walkBookmarkDl(nestedDlNode, nextSegments, items);
       }
