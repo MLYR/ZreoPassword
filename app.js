@@ -1,6 +1,7 @@
 const STORAGE_KEY = "zreo-password-vault-v1";
 const SESSION_KEY = "zreo-password-session-key";
 const SESSION_PASSWORD_KEY = "zreo-password-session-master";
+const IDLE_LOCK_KEY = "zreo-password-idle-minutes";
 const DEFAULT_CATEGORY = "未分类";
 const MAX_BOOKMARK_HTML_BYTES = 20 * 1024 * 1024;
 
@@ -25,6 +26,8 @@ const els = {
   masterPasswordInput: document.querySelector("#masterPasswordInput"),
   confirmPasswordLabel: document.querySelector("#confirmPasswordLabel"),
   confirmPasswordInput: document.querySelector("#confirmPasswordInput"),
+  idleLockInput: document.querySelector("#idleLockInput"),
+  idleLockValue: document.querySelector("#idleLockValue"),
   newItemButton: document.querySelector("#newItemButton"),
   categoryList: document.querySelector("#categoryList"),
   settingsButton: document.querySelector("#settingsButton"),
@@ -765,7 +768,6 @@ async function handleAuth(event) {
   event.preventDefault();
   els.authMessage.textContent = "";
   const password = els.masterPasswordInput.value;
-  const confirmPassword = els.confirmPasswordInput.value;
   const storedVault = getStoredVault();
 
   try {
@@ -774,11 +776,6 @@ async function handleAuth(event) {
         els.authMessage.textContent = "主密码至少 8 位。";
         return;
       }
-      if (password !== confirmPassword) {
-        els.authMessage.textContent = "两次输入的主密码不一致。";
-        return;
-      }
-
       const salt = crypto.getRandomValues(new Uint8Array(16));
       state.key = await deriveKey(password, salt);
       state.records = createStarterRecords();
@@ -793,8 +790,8 @@ async function handleAuth(event) {
     localStorage.setItem(SESSION_KEY, "unlocked");
     els.authScreen.classList.add("is-hidden");
     els.masterPasswordInput.value = "";
-    els.confirmPasswordInput.value = "";
     render();
+    startIdleTimer();
     showToast("密码库已解锁");
   } catch (error) {
     console.error(error);
@@ -806,14 +803,41 @@ function configureAuthScreen() {
   const hasVault = Boolean(getStoredVault());
   els.authTitle.textContent = hasVault ? "解锁密码库" : "创建主密码";
   els.authDescription.textContent = hasVault
-    ? "输入一次主密码。输入一次后记住，直到手动锁定或退出。"
+    ? "输入主密码解锁。也可在设置中开启自动锁定。"
     : "主密码用于派生本地加密密钥。它不会上传，也无法找回，请认真记住。";
   els.authSubmitButton.textContent = hasVault ? "解锁进入" : "创建并进入";
-  els.confirmPasswordLabel.hidden = hasVault;
-  els.confirmPasswordInput.required = !hasVault;
+  // 单密码输入，不再需要确认密码
+  if (els.confirmPasswordLabel) els.confirmPasswordLabel.style.display = "none";
+  if (els.confirmPasswordInput) els.confirmPasswordInput.required = false;
+}
+
+function stopIdleTimer() {
+  if (idleTimer !== null) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+}
+
+function startIdleTimer() {
+  stopIdleTimer();
+  const minutes = parseInt(localStorage.getItem(IDLE_LOCK_KEY), 10) || 5;
+  if (minutes <= 0) return;
+  idleTimer = setTimeout(() => {
+    if (state.key) {
+      lockVault();
+      showToast("已自动锁定");
+    }
+  }, minutes * 60 * 1000);
+}
+
+function resetIdleTimer() {
+  if (idleTimer !== null && state.key) {
+    startIdleTimer();
+  }
 }
 
 function lockVault() {
+  stopIdleTimer();
   state.key = null;
   state.records = [];
   state.selectedId = null;
@@ -1224,6 +1248,20 @@ function bindEvents() {
   els.lengthInput.addEventListener("input", () => {
     els.lengthValue.textContent = els.lengthInput.value;
   });
+  if (els.idleLockInput) {
+    els.idleLockInput.addEventListener("input", () => {
+      const val = els.idleLockInput.value;
+      if (els.idleLockValue) els.idleLockValue.textContent = val;
+      localStorage.setItem(IDLE_LOCK_KEY, val);
+      if (state.key) startIdleTimer();
+    });
+    // restore saved value
+    const saved = localStorage.getItem(IDLE_LOCK_KEY);
+    if (saved !== null) {
+      els.idleLockInput.value = saved;
+      if (els.idleLockValue) els.idleLockValue.textContent = saved;
+    }
+  }
   els.searchInput.addEventListener("input", render);
   els.sortSelect.addEventListener("change", render);
   els.lockButton.addEventListener("click", lockVault);
@@ -1316,11 +1354,20 @@ function bindEvents() {
   });
 }
 
+function setupActivityListeners() {
+  const events = ["click", "keydown", "mousemove", "scroll", "focus"];
+  events.forEach((ev) => {
+    document.addEventListener(ev, resetIdleTimer, { passive: true });
+  });
+}
+
 async function init() {
   configureAuthScreen();
   bindEvents();
+  setupActivityListeners();
   const restored = await restoreSessionUnlock();
   if (restored) {
+    startIdleTimer();
     return;
   }
   els.masterPasswordInput.focus();

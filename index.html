@@ -106,10 +106,7 @@
         主密码
         <input id="masterPasswordInput" type="password" minlength="8" autocomplete="current-password" required>
       </label>
-      <label id="confirmPasswordLabel">
-        确认主密码
-        <input id="confirmPasswordInput" type="password" minlength="8" autocomplete="new-password">
-      </label>
+      
       <button class="primary-button" id="authSubmitButton" type="submit">创建并进入</button>
       <p class="form-message" id="authMessage" role="status"></p>
     </form>
@@ -235,6 +232,18 @@
         <button class="primary-button settings-primary" id="changeMasterPasswordButton" type="button">修改主密码</button>
         <p class="form-message" id="settingsMessage" role="status"></p>
       </section>
+
+      <section class=settings-section>
+        <h4>空闲自动锁定</h4>
+        <label class=settings-range-label>
+          无操作
+          <input id=idleLockInput type=range min=0 max=60 value=5>
+          <span id=idleLockValue>5</span>
+          分钟后自动锁定
+        </label>
+        <p class=settings-note>设为 0 则关闭自动锁定（该功能需保持页面在后台运行）。</p>
+      </section>
+
 
       <section class="settings-section">
         <h4>后续登录能力</h4>
