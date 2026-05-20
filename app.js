@@ -9,6 +9,8 @@ const state = {
   records: [],
   selectedId: null,
   visiblePasswordIds: new Set(),
+  selectedIds: new Set(),
+  batchDeleteMode: false,
   expandedGroups: new Set(),
   lastListClick: { id: null, time: 0 },
   activeCategory: "全部",
@@ -29,6 +31,8 @@ const els = {
   idleLockInput: document.querySelector("#idleLockInput"),
   idleLockValue: document.querySelector("#idleLockValue"),
   newItemButton: document.querySelector("#newItemButton"),
+  batchModeButton: document.querySelector("#batchModeButton"),
+  deleteSelectedButton: document.querySelector("#deleteSelectedButton"),
   categoryList: document.querySelector("#categoryList"),
   settingsButton: document.querySelector("#settingsButton"),
   exportButton: document.querySelector("#exportButton"),
@@ -411,6 +415,7 @@ function renderStats() {
 }
 
 function renderList() {
+  renderBatchDeleteActions();
   const records = getFilteredRecords();
   if (!records.length) {
     els.vaultList.innerHTML = `<div class="empty-list">没有匹配记录。可以新建一条，或者换个关键词试试。</div>`;
@@ -450,6 +455,7 @@ function renderGroupHeading(group, index) {
 
 function renderRecordCard(record) {
   const loginMethod = getLoginMethodMeta(getRecordLoginMethod(record));
+  const isChecked = state.selectedIds.has(record.id);
   const metaLine = [
     record.username || "未设置账号",
     getRecordAccountTag(record),
@@ -458,7 +464,8 @@ function renderRecordCard(record) {
     formatDate(record.updatedAt)
   ].filter(Boolean).join(" · ");
   return `
-    <button class="vault-card ${record.id === state.selectedId ? "is-active" : ""}" type="button" data-id="${record.id}" title="双击打开网址">
+    <button class="vault-card ${record.id === state.selectedId ? "is-active" : ""} ${state.batchDeleteMode ? "is-batch" : ""} ${isChecked ? "is-checked" : ""}" type="button" data-id="${record.id}" title="${state.batchDeleteMode ? "点击选择删除项" : "双击打开网址"}">
+      ${state.batchDeleteMode ? `<span class="vault-card-check" aria-hidden="true">${isChecked ? "✓" : ""}</span>` : ""}
       <div class="vault-card-icon tone-${escapeHtml(getRecordIconTone(record))}" aria-hidden="true">${escapeHtml(getRecordIconText(record))}</div>
       <div class="vault-card-body">
         <div class="vault-card-title">
@@ -469,6 +476,42 @@ function renderRecordCard(record) {
       </div>
     </button>
   `;
+}
+
+function renderBatchDeleteActions() {
+  if (!els.batchModeButton || !els.deleteSelectedButton) return;
+  els.batchModeButton.textContent = state.batchDeleteMode ? "退出批量" : "批量删除";
+  els.batchModeButton.classList.toggle("is-active", state.batchDeleteMode);
+  els.deleteSelectedButton.hidden = !state.batchDeleteMode;
+  els.deleteSelectedButton.textContent = state.selectedIds.size ? `删除选中（${state.selectedIds.size}）` : "删除选中";
+  els.deleteSelectedButton.disabled = state.selectedIds.size === 0;
+}
+
+function toggleBatchDeleteMode(forceValue) {
+  const nextValue = typeof forceValue === "boolean" ? forceValue : !state.batchDeleteMode;
+  state.batchDeleteMode = nextValue;
+  if (!nextValue) {
+    state.selectedIds.clear();
+  }
+  render();
+}
+
+async function deleteSelectedRecords() {
+  if (!state.selectedIds.size) {
+    showToast("请先选择要删除的记录");
+    return;
+  }
+
+  const confirmed = window.confirm(`确认删除选中的 ${state.selectedIds.size} 条记录？此操作会写入新的本地加密库。`);
+  if (!confirmed) return;
+
+  state.records = state.records.filter((item) => !state.selectedIds.has(item.id));
+  state.selectedId = state.records[0] ? state.records[0].id : null;
+  state.selectedIds.clear();
+  state.batchDeleteMode = false;
+  await persistRecords();
+  render();
+  showToast("选中记录已删除");
 }
 
 function renderDetail() {
@@ -842,6 +885,8 @@ function lockVault() {
   state.records = [];
   state.selectedId = null;
   state.visiblePasswordIds.clear();
+  state.selectedIds.clear();
+  state.batchDeleteMode = false;
   localStorage.removeItem(SESSION_KEY);
   localStorage.removeItem(SESSION_PASSWORD_KEY);
   configureAuthScreen();
@@ -1228,6 +1273,8 @@ function escapeHtml(value) {
 function bindEvents() {
   els.authForm.addEventListener("submit", handleAuth);
   els.newItemButton.addEventListener("click", openCreateDialog);
+  els.batchModeButton.addEventListener("click", () => toggleBatchDeleteMode());
+  els.deleteSelectedButton.addEventListener("click", deleteSelectedRecords);
   els.itemForm.addEventListener("submit", saveRecord);
   els.closeDialogButton.addEventListener("click", () => els.itemDialog.close());
   els.cancelButton.addEventListener("click", () => els.itemDialog.close());
@@ -1318,6 +1365,15 @@ function bindEvents() {
     const now = Date.now();
     const id = card.dataset.id;
     const record = state.records.find((item) => item.id === id);
+    if (state.batchDeleteMode) {
+      if (state.selectedIds.has(id)) {
+        state.selectedIds.delete(id);
+      } else {
+        state.selectedIds.add(id);
+      }
+      renderList();
+      return;
+    }
     const isQuickRepeatClick = state.lastListClick.id === id && now - state.lastListClick.time < 450;
     state.lastListClick = { id, time: now };
     if (event.detail >= 2 || isQuickRepeatClick) {
