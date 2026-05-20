@@ -9,14 +9,17 @@ const state = {
   records: [],
   selectedId: null,
   visiblePasswordIds: new Set(),
-  selectedIds: new Set(),
-  batchDeleteMode: false,
+  selectedRecordIds: new Set(),
   expandedGroups: new Set(),
   lastListClick: { id: null, time: 0 },
   activeCategory: "全部",
+  contextCategoryName: "",
+  isBatchDeleteMode: false,
   key: null,
   mode: "create"
 };
+
+let idleTimer = null;
 
 const els = {
   authScreen: document.querySelector("#authScreen"),
@@ -31,8 +34,12 @@ const els = {
   idleLockInput: document.querySelector("#idleLockInput"),
   idleLockValue: document.querySelector("#idleLockValue"),
   newItemButton: document.querySelector("#newItemButton"),
+  batchToolbar: document.querySelector("#batchToolbar"),
   batchModeButton: document.querySelector("#batchModeButton"),
+  selectVisibleButton: document.querySelector("#selectVisibleButton"),
+  clearSelectedButton: document.querySelector("#clearSelectedButton"),
   deleteSelectedButton: document.querySelector("#deleteSelectedButton"),
+  exitBatchButton: document.querySelector("#exitBatchButton"),
   categoryList: document.querySelector("#categoryList"),
   settingsButton: document.querySelector("#settingsButton"),
   exportButton: document.querySelector("#exportButton"),
@@ -75,6 +82,23 @@ const els = {
   confirmNewMasterPasswordInput: document.querySelector("#confirmNewMasterPasswordInput"),
   changeMasterPasswordButton: document.querySelector("#changeMasterPasswordButton"),
   settingsMessage: document.querySelector("#settingsMessage"),
+  categoryContextMenu: document.querySelector("#categoryContextMenu"),
+  renameCategoryButton: document.querySelector("#renameCategoryButton"),
+  removeCategoryButton: document.querySelector("#removeCategoryButton"),
+  renameCategoryDialog: document.querySelector("#renameCategoryDialog"),
+  renameCategoryForm: document.querySelector("#renameCategoryForm"),
+  renameCategorySource: document.querySelector("#renameCategorySource"),
+  renameCategoryInput: document.querySelector("#renameCategoryInput"),
+  renameCategoryMessage: document.querySelector("#renameCategoryMessage"),
+  closeRenameCategoryButton: document.querySelector("#closeRenameCategoryButton"),
+  cancelRenameCategoryButton: document.querySelector("#cancelRenameCategoryButton"),
+  deleteCategoryDialog: document.querySelector("#deleteCategoryDialog"),
+  deleteCategoryForm: document.querySelector("#deleteCategoryForm"),
+  deleteCategoryName: document.querySelector("#deleteCategoryName"),
+  deleteCategoryPasswordInput: document.querySelector("#deleteCategoryPasswordInput"),
+  deleteCategoryMessage: document.querySelector("#deleteCategoryMessage"),
+  closeDeleteCategoryButton: document.querySelector("#closeDeleteCategoryButton"),
+  cancelDeleteCategoryButton: document.querySelector("#cancelDeleteCategoryButton"),
   toast: document.querySelector("#toast")
 };
 
@@ -387,7 +411,7 @@ function renderCategories() {
   const categories = [...counts.keys()];
 
   els.categoryList.innerHTML = categories.map((category) => `
-    <button class="category-button ${category === state.activeCategory ? "is-active" : ""}" type="button" data-category="${escapeHtml(category)}">
+    <button class="category-button ${category === state.activeCategory ? "is-active" : ""}" type="button" data-category="${escapeHtml(category)}" data-category-menu="${category !== "全部" ? "true" : "false"}">
       <span>${escapeHtml(category)}</span>
       <strong>${counts.get(category)}</strong>
     </button>
@@ -397,6 +421,59 @@ function renderCategories() {
     .filter((category) => category !== "全部")
     .map((category) => `<option value="${escapeHtml(category)}"></option>`)
     .join("");
+}
+
+function getVisibleRecordIds() {
+  return new Set(getFilteredRecords().map((record) => record.id));
+}
+
+function syncSelectedRecordIdsWithVisible() {
+  if (!state.isBatchDeleteMode) return;
+  const visibleIds = getVisibleRecordIds();
+  state.selectedRecordIds = new Set(
+    [...state.selectedRecordIds].filter((id) => visibleIds.has(id))
+  );
+}
+
+function closeCategoryContextMenu() {
+  if (!els.categoryContextMenu) return;
+  els.categoryContextMenu.hidden = true;
+}
+
+function openCategoryContextMenu(categoryName, position) {
+  if (!els.categoryContextMenu || categoryName === "全部") return;
+  state.contextCategoryName = categoryName;
+  state.activeCategory = categoryName;
+  render();
+  els.categoryContextMenu.hidden = false;
+  const maxX = window.innerWidth - 156;
+  const maxY = window.innerHeight - 96;
+  els.categoryContextMenu.style.left = `${Math.max(8, Math.min(position.x, maxX))}px`;
+  els.categoryContextMenu.style.top = `${Math.max(8, Math.min(position.y, maxY))}px`;
+}
+
+function renderBatchToolbar() {
+  if (!els.batchToolbar || !els.batchModeButton) return;
+  els.batchToolbar.hidden = !state.isBatchDeleteMode;
+  els.batchModeButton.hidden = state.isBatchDeleteMode;
+  if (els.deleteSelectedButton) {
+    const count = state.selectedRecordIds.size;
+    els.deleteSelectedButton.disabled = count === 0;
+    els.deleteSelectedButton.textContent = count ? `删除选中（${count}）` : "删除选中";
+  }
+}
+
+function enterBatchDeleteMode() {
+  state.isBatchDeleteMode = true;
+  state.selectedRecordIds.clear();
+  syncSelectedRecordIdsWithVisible();
+  render();
+}
+
+function exitBatchDeleteMode() {
+  state.isBatchDeleteMode = false;
+  state.selectedRecordIds.clear();
+  render();
 }
 
 function renderStats() {
@@ -415,7 +492,8 @@ function renderStats() {
 }
 
 function renderList() {
-  renderBatchDeleteActions();
+  syncSelectedRecordIdsWithVisible();
+  renderBatchToolbar();
   const records = getFilteredRecords();
   if (!records.length) {
     els.vaultList.innerHTML = `<div class="empty-list">没有匹配记录。可以新建一条，或者换个关键词试试。</div>`;
@@ -455,7 +533,7 @@ function renderGroupHeading(group, index) {
 
 function renderRecordCard(record) {
   const loginMethod = getLoginMethodMeta(getRecordLoginMethod(record));
-  const isChecked = state.selectedIds.has(record.id);
+  const isChecked = state.selectedRecordIds.has(record.id);
   const metaLine = [
     record.username || "未设置账号",
     getRecordAccountTag(record),
@@ -464,8 +542,8 @@ function renderRecordCard(record) {
     formatDate(record.updatedAt)
   ].filter(Boolean).join(" · ");
   return `
-    <button class="vault-card ${record.id === state.selectedId ? "is-active" : ""} ${state.batchDeleteMode ? "is-batch" : ""} ${isChecked ? "is-checked" : ""}" type="button" data-id="${record.id}" title="${state.batchDeleteMode ? "点击选择删除项" : "双击打开网址"}">
-      ${state.batchDeleteMode ? `<span class="vault-card-check" aria-hidden="true">${isChecked ? "✓" : ""}</span>` : ""}
+    <button class="vault-card ${record.id === state.selectedId ? "is-active" : ""} ${state.isBatchDeleteMode ? "is-batch-mode" : ""} ${isChecked ? "is-checked" : ""}" type="button" data-id="${record.id}" title="${state.isBatchDeleteMode ? "点击勾选记录" : "双击打开网址"}">
+      ${state.isBatchDeleteMode ? `<span class="vault-card-checkbox" aria-hidden="true">${isChecked ? "✓" : ""}</span>` : ""}
       <div class="vault-card-icon tone-${escapeHtml(getRecordIconTone(record))}" aria-hidden="true">${escapeHtml(getRecordIconText(record))}</div>
       <div class="vault-card-body">
         <div class="vault-card-title">
@@ -476,42 +554,6 @@ function renderRecordCard(record) {
       </div>
     </button>
   `;
-}
-
-function renderBatchDeleteActions() {
-  if (!els.batchModeButton || !els.deleteSelectedButton) return;
-  els.batchModeButton.textContent = state.batchDeleteMode ? "退出批量" : "批量删除";
-  els.batchModeButton.classList.toggle("is-active", state.batchDeleteMode);
-  els.deleteSelectedButton.hidden = !state.batchDeleteMode;
-  els.deleteSelectedButton.textContent = state.selectedIds.size ? `删除选中（${state.selectedIds.size}）` : "删除选中";
-  els.deleteSelectedButton.disabled = state.selectedIds.size === 0;
-}
-
-function toggleBatchDeleteMode(forceValue) {
-  const nextValue = typeof forceValue === "boolean" ? forceValue : !state.batchDeleteMode;
-  state.batchDeleteMode = nextValue;
-  if (!nextValue) {
-    state.selectedIds.clear();
-  }
-  render();
-}
-
-async function deleteSelectedRecords() {
-  if (!state.selectedIds.size) {
-    showToast("请先选择要删除的记录");
-    return;
-  }
-
-  const confirmed = window.confirm(`确认删除选中的 ${state.selectedIds.size} 条记录？此操作会写入新的本地加密库。`);
-  if (!confirmed) return;
-
-  state.records = state.records.filter((item) => !state.selectedIds.has(item.id));
-  state.selectedId = state.records[0] ? state.records[0].id : null;
-  state.selectedIds.clear();
-  state.batchDeleteMode = false;
-  await persistRecords();
-  render();
-  showToast("选中记录已删除");
 }
 
 function renderDetail() {
@@ -654,6 +696,10 @@ function render() {
 }
 
 function openCreateDialog() {
+  closeCategoryContextMenu();
+  if (state.isBatchDeleteMode) {
+    exitBatchDeleteMode();
+  }
   state.mode = "create";
   state.selectedId = state.selectedId || (state.records[0] && state.records[0].id);
   els.dialogTitle.textContent = "新建记录";
@@ -670,6 +716,10 @@ function openCreateDialog() {
 }
 
 function openEditDialog(record) {
+  closeCategoryContextMenu();
+  if (state.isBatchDeleteMode) {
+    exitBatchDeleteMode();
+  }
   state.mode = "edit";
   els.dialogTitle.textContent = "编辑记录";
   els.deleteButton.hidden = false;
@@ -735,6 +785,121 @@ async function deleteSelectedRecord() {
   els.itemDialog.close();
   render();
   showToast("记录已删除");
+}
+
+async function validateMasterPassword(password) {
+  const storedVault = getStoredVault();
+  if (!storedVault) {
+    throw new Error("Vault not found");
+  }
+  const key = await deriveKey(password, base64ToBytes(storedVault.salt));
+  await decryptVault(storedVault, key);
+}
+
+function openRenameCategoryDialog() {
+  closeCategoryContextMenu();
+  if (!state.contextCategoryName) return;
+  els.renameCategoryMessage.textContent = "";
+  els.renameCategorySource.textContent = state.contextCategoryName;
+  els.renameCategoryInput.value = state.contextCategoryName;
+  els.renameCategoryDialog.showModal();
+  els.renameCategoryInput.focus();
+  els.renameCategoryInput.select();
+}
+
+async function saveCategoryRename(event) {
+  event.preventDefault();
+  const oldName = state.contextCategoryName;
+  const nextName = normalizeCategory(els.renameCategoryInput.value);
+  els.renameCategoryMessage.textContent = "";
+
+  if (!oldName) return;
+  if (!nextName) {
+    els.renameCategoryMessage.textContent = "分类名不能为空。";
+    return;
+  }
+  if (nextName === oldName) {
+    els.renameCategoryDialog.close();
+    return;
+  }
+
+  state.records = state.records.map((record) => (
+    record.category === oldName
+      ? { ...record, category: nextName, updatedAt: new Date().toISOString() }
+      : record
+  ));
+
+  if (state.activeCategory === oldName) {
+    state.activeCategory = nextName;
+  }
+
+  await persistRecords();
+  els.renameCategoryDialog.close();
+  render();
+  showToast("分类已更新");
+}
+
+function openDeleteCategoryDialog() {
+  closeCategoryContextMenu();
+  if (!state.contextCategoryName) return;
+  els.deleteCategoryMessage.textContent = "";
+  els.deleteCategoryName.textContent = state.contextCategoryName;
+  els.deleteCategoryPasswordInput.value = "";
+  els.deleteCategoryDialog.showModal();
+  els.deleteCategoryPasswordInput.focus();
+}
+
+async function deleteCategoryRecords(event) {
+  event.preventDefault();
+  const categoryName = state.contextCategoryName;
+  const password = els.deleteCategoryPasswordInput.value;
+  els.deleteCategoryMessage.textContent = "";
+
+  if (!categoryName || categoryName === "全部") return;
+  if (!password) {
+    els.deleteCategoryMessage.textContent = "请输入主密码。";
+    return;
+  }
+
+  try {
+    await validateMasterPassword(password);
+    state.records = state.records.filter((record) => record.category !== categoryName);
+    if (state.activeCategory === categoryName) {
+      state.activeCategory = "全部";
+    }
+    if (!state.records.some((record) => record.id === state.selectedId)) {
+      state.selectedId = state.records[0] ? state.records[0].id : null;
+    }
+    await persistRecords();
+    els.deleteCategoryDialog.close();
+    render();
+    showToast("分类及其记录已删除");
+  } catch (error) {
+    console.error(error);
+    els.deleteCategoryMessage.textContent = "主密码错误。";
+  }
+}
+
+async function deleteSelectedRecords() {
+  syncSelectedRecordIdsWithVisible();
+  const ids = [...state.selectedRecordIds];
+  if (!ids.length) {
+    showToast("请先选择要删除的记录");
+    return;
+  }
+
+  const confirmed = window.confirm(`确认删除选中的 ${ids.length} 条记录？此操作会写入新的本地加密库。`);
+  if (!confirmed) return;
+
+  state.records = state.records.filter((record) => !state.selectedRecordIds.has(record.id));
+  state.selectedRecordIds.clear();
+  state.isBatchDeleteMode = false;
+  if (!state.records.some((record) => record.id === state.selectedId)) {
+    state.selectedId = state.records[0] ? state.records[0].id : null;
+  }
+  await persistRecords();
+  render();
+  showToast("选中记录已删除");
 }
 
 async function changeMasterPassword() {
@@ -885,16 +1050,19 @@ function lockVault() {
   state.records = [];
   state.selectedId = null;
   state.visiblePasswordIds.clear();
-  state.selectedIds.clear();
-  state.batchDeleteMode = false;
+  state.selectedRecordIds.clear();
+  state.isBatchDeleteMode = false;
+  state.contextCategoryName = "";
   localStorage.removeItem(SESSION_KEY);
   localStorage.removeItem(SESSION_PASSWORD_KEY);
+  closeCategoryContextMenu();
   configureAuthScreen();
   els.authScreen.classList.remove("is-hidden");
   els.masterPasswordInput.focus();
 }
 
 function openSettingsDialog() {
+  closeCategoryContextMenu();
   els.settingsMessage.textContent = "";
   els.currentMasterPasswordInput.value = "";
   els.newMasterPasswordInput.value = "";
@@ -1273,8 +1441,17 @@ function escapeHtml(value) {
 function bindEvents() {
   els.authForm.addEventListener("submit", handleAuth);
   els.newItemButton.addEventListener("click", openCreateDialog);
-  els.batchModeButton.addEventListener("click", () => toggleBatchDeleteMode());
+  els.batchModeButton.addEventListener("click", enterBatchDeleteMode);
+  els.selectVisibleButton.addEventListener("click", () => {
+    state.selectedRecordIds = getVisibleRecordIds();
+    renderList();
+  });
+  els.clearSelectedButton.addEventListener("click", () => {
+    state.selectedRecordIds.clear();
+    renderList();
+  });
   els.deleteSelectedButton.addEventListener("click", deleteSelectedRecords);
+  els.exitBatchButton.addEventListener("click", exitBatchDeleteMode);
   els.itemForm.addEventListener("submit", saveRecord);
   els.closeDialogButton.addEventListener("click", () => els.itemDialog.close());
   els.cancelButton.addEventListener("click", () => els.itemDialog.close());
@@ -1314,6 +1491,14 @@ function bindEvents() {
   els.lockButton.addEventListener("click", lockVault);
   els.exportButton.addEventListener("click", exportBookmarksHtml);
   els.importInput.addEventListener("change", importBookmarksHtml);
+  els.renameCategoryButton.addEventListener("click", openRenameCategoryDialog);
+  els.removeCategoryButton.addEventListener("click", openDeleteCategoryDialog);
+  els.renameCategoryForm.addEventListener("submit", saveCategoryRename);
+  els.deleteCategoryForm.addEventListener("submit", deleteCategoryRecords);
+  els.closeRenameCategoryButton.addEventListener("click", () => els.renameCategoryDialog.close());
+  els.cancelRenameCategoryButton.addEventListener("click", () => els.renameCategoryDialog.close());
+  els.closeDeleteCategoryButton.addEventListener("click", () => els.deleteCategoryDialog.close());
+  els.cancelDeleteCategoryButton.addEventListener("click", () => els.deleteCategoryDialog.close());
 
   if (window.desktopBridge?.onAction) {
     const detachDesktopActionListener = window.desktopBridge.onAction((action) => {
@@ -1340,8 +1525,24 @@ function bindEvents() {
   els.categoryList.addEventListener("click", (event) => {
     const button = event.target.closest("[data-category]");
     if (!button) return;
+    closeCategoryContextMenu();
     state.activeCategory = button.dataset.category;
+    if (state.isBatchDeleteMode) {
+      syncSelectedRecordIdsWithVisible();
+    }
     render();
+  });
+
+  els.categoryList.addEventListener("contextmenu", (event) => {
+    const button = event.target.closest("[data-category]");
+    if (!button) return;
+    const categoryName = button.dataset.category;
+    if (categoryName === "全部") {
+      closeCategoryContextMenu();
+      return;
+    }
+    event.preventDefault();
+    openCategoryContextMenu(categoryName, { x: event.clientX, y: event.clientY });
   });
 
   els.vaultList.addEventListener("click", (event) => {
@@ -1362,18 +1563,19 @@ function bindEvents() {
 
     const card = event.target.closest("[data-id]");
     if (!card) return;
-    const now = Date.now();
-    const id = card.dataset.id;
-    const record = state.records.find((item) => item.id === id);
-    if (state.batchDeleteMode) {
-      if (state.selectedIds.has(id)) {
-        state.selectedIds.delete(id);
+    if (state.isBatchDeleteMode) {
+      const id = card.dataset.id;
+      if (state.selectedRecordIds.has(id)) {
+        state.selectedRecordIds.delete(id);
       } else {
-        state.selectedIds.add(id);
+        state.selectedRecordIds.add(id);
       }
       renderList();
       return;
     }
+    const now = Date.now();
+    const id = card.dataset.id;
+    const record = state.records.find((item) => item.id === id);
     const isQuickRepeatClick = state.lastListClick.id === id && now - state.lastListClick.time < 450;
     state.lastListClick = { id, time: now };
     if (event.detail >= 2 || isQuickRepeatClick) {
@@ -1406,8 +1608,22 @@ function bindEvents() {
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
       els.searchInput.focus();
+      return;
+    }
+    if (event.key === "Escape") {
+      closeCategoryContextMenu();
     }
   });
+
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest("#categoryContextMenu") && !event.target.closest("[data-category]")) {
+      closeCategoryContextMenu();
+    }
+  });
+
+  els.vaultList.addEventListener("scroll", closeCategoryContextMenu);
+  window.addEventListener("scroll", closeCategoryContextMenu);
+  window.addEventListener("resize", closeCategoryContextMenu);
 }
 
 function setupActivityListeners() {

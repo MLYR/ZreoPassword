@@ -170,9 +170,8 @@ button {
   overflow: auto;
 }
 
-.sidebar-tools {
-  display: grid;
-  gap: 8px;
+.category-button:hover {
+  background: rgba(0, 88, 188, 0.08);
 }
 
 .category-button {
@@ -309,20 +308,41 @@ button {
 }
 
 .vault-list-panel {
+  display: flex;
+  flex-direction: column;
   background: #f9f9ff;
   border-width: 0 1px 0 0;
 }
 
 .panel-heading {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
   gap: 8px;
-  height: 56px;
+  min-height: 56px;
   padding: 11px 16px;
   border-bottom: 1px solid var(--line);
   background: rgba(249, 249, 255, 0.82);
   backdrop-filter: blur(6px);
+}
+
+.panel-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.batch-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.batch-toolbar[hidden],
+.context-menu[hidden] {
+  display: none !important;
 }
 
 .panel-heading select {
@@ -338,8 +358,9 @@ button {
 
 .vault-list {
   display: grid;
+  flex: 1;
   gap: 2px;
-  max-height: calc(100vh - 56px);
+  min-height: 0;
   padding: 12px 8px;
   overflow: auto;
 }
@@ -404,7 +425,7 @@ button {
   text-align: left;
 }
 
-.vault-card.is-batch {
+.vault-card.is-batch-mode {
   padding-left: 44px;
 }
 
@@ -412,7 +433,7 @@ button {
   box-shadow: inset 0 0 0 2px rgba(0, 88, 188, 0.22);
 }
 
-.vault-card-check {
+.vault-card-checkbox {
   position: absolute;
   top: 50%;
   left: 12px;
@@ -427,12 +448,6 @@ button {
   font-size: 12px;
   font-weight: 800;
   transform: translateY(-50%);
-}
-
-.ghost-button.is-active {
-  color: #ffffff;
-  background: var(--accent);
-  border-color: var(--accent);
 }
 
 .vault-card.is-active {
@@ -984,6 +999,47 @@ select:focus {
   margin: 0;
   color: var(--muted);
   line-height: 1.7;
+}
+
+.category-dialog {
+  width: min(520px, calc(100vw - 32px));
+}
+
+.category-inline-section {
+  margin-top: 20px;
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 60;
+  display: grid;
+  min-width: 140px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 16px 32px rgba(15, 23, 42, 0.14);
+  backdrop-filter: blur(12px);
+}
+
+.context-menu-item {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--text);
+  background: transparent;
+  font-size: 13px;
+  text-align: left;
+}
+
+.context-menu-item:hover {
+  background: var(--panel-muted);
+}
+
+.context-menu-item.danger {
+  color: var(--danger);
 }
 
 .toast {

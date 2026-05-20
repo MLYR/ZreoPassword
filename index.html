@@ -23,11 +23,6 @@
         新建记录
       </button>
 
-      <div class="sidebar-tools">
-        <button class="ghost-button" id="batchModeButton" type="button">批量删除</button>
-        <button class="danger-button" id="deleteSelectedButton" type="button" hidden>删除选中</button>
-      </div>
-
       <nav class="category-list" id="categoryList" aria-label="分类筛选"></nav>
 
       <div class="sidebar-footer">
@@ -74,11 +69,20 @@
               <span aria-hidden="true">⌘K</span>
               <input id="searchInput" type="search" placeholder="搜索标题、账号、网址、备注">
             </div>
-            <select id="sortSelect" aria-label="排序方式">
-              <option value="updatedDesc">最近更新</option>
-              <option value="titleAsc">标题 A-Z</option>
-              <option value="categoryAsc">分类</option>
-            </select>
+            <div class="panel-toolbar">
+              <div class="batch-toolbar" id="batchToolbar" hidden>
+                <button class="ghost-button" id="selectVisibleButton" type="button">全选</button>
+                <button class="ghost-button" id="clearSelectedButton" type="button">取消全选</button>
+                <button class="danger-button" id="deleteSelectedButton" type="button">删除选中</button>
+                <button class="ghost-button" id="exitBatchButton" type="button">退出批量</button>
+              </div>
+              <button class="ghost-button" id="batchModeButton" type="button">批量删除</button>
+              <select id="sortSelect" aria-label="排序方式">
+                <option value="updatedDesc">最近更新</option>
+                <option value="titleAsc">标题 A-Z</option>
+                <option value="categoryAsc">分类</option>
+              </select>
+            </div>
           </div>
 
           <div class="vault-list" id="vaultList" aria-live="polite"></div>
@@ -254,6 +258,65 @@
         <h4>后续登录能力</h4>
         <p class="settings-note">这里后续可以接入账号登录、多设备同步、WebDAV / Dropbox / Drive 备份和桌面端系统钥匙串。</p>
       </section>
+    </form>
+  </dialog>
+
+  <div class="context-menu" id="categoryContextMenu" hidden>
+    <button class="context-menu-item" id="renameCategoryButton" type="button">重命名</button>
+    <button class="context-menu-item danger" id="removeCategoryButton" type="button">删除</button>
+  </div>
+
+  <dialog class="item-dialog category-dialog" id="renameCategoryDialog">
+    <form id="renameCategoryForm" method="dialog">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">分类操作</p>
+          <h3>重命名分类</h3>
+        </div>
+        <button class="icon-button" id="closeRenameCategoryButton" type="button" aria-label="关闭">×</button>
+      </div>
+      <div class="settings-section category-inline-section">
+        <p class="settings-note">当前分类：<strong id="renameCategorySource"></strong></p>
+        <label>
+          新分类名
+          <input id="renameCategoryInput" type="text" placeholder="输入新的分类名">
+        </label>
+        <p class="form-message" id="renameCategoryMessage" role="status"></p>
+      </div>
+      <div class="dialog-actions">
+        <div></div>
+        <div>
+          <button class="ghost-button" id="cancelRenameCategoryButton" type="button">取消</button>
+          <button class="primary-button" id="confirmRenameCategoryButton" type="submit">确认</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="item-dialog category-dialog" id="deleteCategoryDialog">
+    <form id="deleteCategoryForm" method="dialog">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">分类操作</p>
+          <h3>删除分类</h3>
+        </div>
+        <button class="icon-button" id="closeDeleteCategoryButton" type="button" aria-label="关闭">×</button>
+      </div>
+      <div class="settings-section category-inline-section">
+        <p class="settings-note">将删除分类 <strong id="deleteCategoryName"></strong> 下的全部记录。</p>
+        <label>
+          主密码
+          <input id="deleteCategoryPasswordInput" type="password" autocomplete="current-password" placeholder="输入主密码确认删除">
+        </label>
+        <p class="form-message" id="deleteCategoryMessage" role="status"></p>
+      </div>
+      <div class="dialog-actions">
+        <div></div>
+        <div>
+          <button class="ghost-button" id="cancelDeleteCategoryButton" type="button">取消</button>
+          <button class="danger-button" id="confirmDeleteCategoryButton" type="submit">确认删除</button>
+        </div>
+      </div>
     </form>
   </dialog>
 
