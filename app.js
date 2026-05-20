@@ -172,13 +172,13 @@ async function unlockWithPassword(password, options = {}) {
 
   if (options.rememberSession) {
     // 仅保存在当前标签页会话中，刷新可用，关闭标签页后由浏览器清理。
-    sessionStorage.setItem(SESSION_KEY, "unlocked");
-    sessionStorage.setItem(SESSION_PASSWORD_KEY, password);
+    localStorage.setItem(SESSION_KEY, "unlocked");
+    localStorage.setItem(SESSION_PASSWORD_KEY, password);
   }
 }
 
 async function restoreSessionUnlock() {
-  const password = sessionStorage.getItem(SESSION_PASSWORD_KEY);
+  const password = localStorage.getItem(SESSION_PASSWORD_KEY);
   if (!password || !getStoredVault()) {
     return false;
   }
@@ -190,8 +190,8 @@ async function restoreSessionUnlock() {
     return true;
   } catch (error) {
     console.error(error);
-    sessionStorage.removeItem(SESSION_KEY);
-    sessionStorage.removeItem(SESSION_PASSWORD_KEY);
+    localStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_PASSWORD_KEY);
     return false;
   }
 }
@@ -723,8 +723,8 @@ async function changeMasterPassword() {
     state.key = await deriveKey(newPassword, newSalt);
     const nextVault = await encryptVault(state.records, state.key, newSalt);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(nextVault));
-    sessionStorage.setItem(SESSION_KEY, "unlocked");
-    sessionStorage.setItem(SESSION_PASSWORD_KEY, newPassword);
+    localStorage.setItem(SESSION_KEY, "unlocked");
+    localStorage.setItem(SESSION_PASSWORD_KEY, newPassword);
     els.currentMasterPasswordInput.value = "";
     els.newMasterPasswordInput.value = "";
     els.confirmNewMasterPasswordInput.value = "";
@@ -785,12 +785,12 @@ async function handleAuth(event) {
       state.selectedId = state.records[0].id;
       const vault = await encryptVault(state.records, state.key, salt);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(vault));
-      sessionStorage.setItem(SESSION_PASSWORD_KEY, password);
+      localStorage.setItem(SESSION_PASSWORD_KEY, password);
     } else {
       await unlockWithPassword(password, { rememberSession: true });
     }
 
-    sessionStorage.setItem(SESSION_KEY, "unlocked");
+    localStorage.setItem(SESSION_KEY, "unlocked");
     els.authScreen.classList.add("is-hidden");
     els.masterPasswordInput.value = "";
     els.confirmPasswordInput.value = "";
@@ -806,7 +806,7 @@ function configureAuthScreen() {
   const hasVault = Boolean(getStoredVault());
   els.authTitle.textContent = hasVault ? "解锁密码库" : "创建主密码";
   els.authDescription.textContent = hasVault
-    ? "输入一次主密码。只要当前页面/标签页不关闭，刷新后会自动恢复。"
+    ? "输入一次主密码。输入一次后记住，直到手动锁定或退出。"
     : "主密码用于派生本地加密密钥。它不会上传，也无法找回，请认真记住。";
   els.authSubmitButton.textContent = hasVault ? "解锁进入" : "创建并进入";
   els.confirmPasswordLabel.hidden = hasVault;
@@ -818,8 +818,8 @@ function lockVault() {
   state.records = [];
   state.selectedId = null;
   state.visiblePasswordIds.clear();
-  sessionStorage.removeItem(SESSION_KEY);
-  sessionStorage.removeItem(SESSION_PASSWORD_KEY);
+  localStorage.removeItem(SESSION_KEY);
+  localStorage.removeItem(SESSION_PASSWORD_KEY);
   configureAuthScreen();
   els.authScreen.classList.remove("is-hidden");
   els.masterPasswordInput.focus();
