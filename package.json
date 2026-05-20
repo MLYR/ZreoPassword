@@ -5,8 +5,9 @@
   "main": "electron/main.cjs",
   "description": "小〇密码本地桌面密码管理框架",
   "scripts": {
+    "dev": "python3 -m http.server 5173",
+    "desktop": "electron .",
     "start": "electron .",
-    "dev": "electron .",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
     "dist:mac": "electron-builder --mac --arm64",
