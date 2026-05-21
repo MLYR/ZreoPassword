@@ -1218,10 +1218,10 @@ async function importChromePasswordsCsv(event) {
 
     const text = await file.text();
     const result = await importChromePasswordsText(text);
-    if (result.updated > 0) {
-      showToast(`已更新 ${result.updated} 条，跳过 ${result.skipped} 条`);
+    if (result.updated > 0 || result.created > 0) {
+      showToast(`已更新 ${result.updated} 条，新增 ${result.created} 条，跳过 ${result.skipped} 条`);
     } else {
-      showToast("没有匹配到现有网址，未导入任何密码");
+      showToast("没有匹配到现有域名，未导入任何密码");
     }
   } catch (error) {
     console.error(error);
@@ -1246,30 +1246,26 @@ async function importChromePasswordsText(text) {
   const now = new Date().toISOString();
   const indexes = buildUrlRecordIndexes(state.records);
   let updated = 0;
+  let created = 0;
   let skipped = 0;
 
   items.forEach((item) => {
-    const target = findChromePasswordTarget(item, indexes);
-    if (!target) {
+    const result = applyChromePasswordItem(item, indexes, now);
+    if (result === "updated") {
+      updated += 1;
+    } else if (result === "created") {
+      created += 1;
+    } else {
       skipped += 1;
-      return;
     }
-
-    // Chrome CSV 是明文密码来源，只补全已有网址记录，不创建新条目。
-    target.username = item.username;
-    target.password = item.password;
-    target.note = item.note;
-    target.loginMethod = "password";
-    target.updatedAt = now;
-    updated += 1;
   });
 
-  if (updated > 0) {
+  if (updated > 0 || created > 0) {
     await persistRecords();
     render();
   }
 
-  return { updated, skipped };
+  return { updated, created, skipped };
 }
 
 function parseChromePasswordCsv(text) {
@@ -1356,6 +1352,7 @@ function parseCsvRows(text) {
 function buildUrlRecordIndexes(records) {
   const exact = new Map();
   const path = new Map();
+  const host = new Map();
 
   records.forEach((record) => {
     const keys = getUrlMatchKeys(record.url);
@@ -1365,9 +1362,12 @@ function buildUrlRecordIndexes(records) {
     if (keys.path) {
       addRecordToUrlIndex(path, keys.path, record);
     }
+    if (keys.host) {
+      addRecordToUrlIndex(host, keys.host, record);
+    }
   });
 
-  return { exact, path };
+  return { exact, path, host };
 }
 
 function addRecordToUrlIndex(index, key, record) {
@@ -1377,13 +1377,37 @@ function addRecordToUrlIndex(index, key, record) {
   index.get(key).push(record);
 }
 
-function findChromePasswordTarget(item, indexes) {
+function applyChromePasswordItem(item, indexes, now) {
+  const keys = getUrlMatchKeys(item.url);
+  const domainRecords = indexes.host.get(keys.host) || [];
+  if (!keys.host || !domainRecords.length) {
+    return "skipped";
+  }
+
+  const target = findChromePasswordTarget(item, indexes, domainRecords);
+  if (target) {
+    updateRecordFromChromePassword(target, item, now);
+    return "updated";
+  }
+
+  const baseRecord = findChromePasswordBaseRecord(item, indexes, domainRecords);
+  if (!baseRecord) {
+    return "skipped";
+  }
+
+  const record = createRecordFromChromePasswordItem(item, baseRecord, now);
+  state.records.push(record);
+  addChromePasswordRecordToIndexes(record, indexes);
+  return "created";
+}
+
+function findChromePasswordTarget(item, indexes, domainRecords) {
   const keys = getUrlMatchKeys(item.url);
   const candidates = [];
   const seenIds = new Set();
 
-  // 先完整网址匹配，再用 origin + pathname 兜底，避免 query 差异漏匹配。
-  [indexes.exact.get(keys.exact), indexes.path.get(keys.path)].forEach((records) => {
+  // 先完整网址匹配，再用路径和域名兜底；同域名允许多账号导入。
+  [indexes.exact.get(keys.exact), indexes.path.get(keys.path), domainRecords].forEach((records) => {
     (records || []).forEach((record) => {
       if (!seenIds.has(record.id)) {
         seenIds.add(record.id);
@@ -1398,19 +1422,77 @@ function findChromePasswordTarget(item, indexes) {
 
   const username = item.username.trim().toLowerCase();
   if (username) {
-    const sameUsername = candidates.filter((record) => String(record.username ?? "").trim().toLowerCase() === username);
+    const sameUsername = candidates.filter((record) => normalizeChromeUsername(record.username) === username);
     if (sameUsername.length === 1) {
       return sameUsername[0];
     }
+    if (sameUsername.length > 1) {
+      return null;
+    }
+
+    const blankUsername = candidates.filter((record) => !normalizeChromeUsername(record.username));
+    if (blankUsername.length === 1) {
+      return blankUsername[0];
+    }
+
+    return null;
   }
 
   return candidates.length === 1 ? candidates[0] : null;
 }
 
+function findChromePasswordBaseRecord(item, indexes, domainRecords) {
+  const keys = getUrlMatchKeys(item.url);
+  const pathRecords = indexes.path.get(keys.path) || [];
+  const exactRecords = indexes.exact.get(keys.exact) || [];
+  return exactRecords[0] || pathRecords[0] || domainRecords[0] || null;
+}
+
+function updateRecordFromChromePassword(record, item, now) {
+  record.username = item.username;
+  record.password = item.password;
+  record.note = item.note;
+  record.loginMethod = "password";
+  record.updatedAt = now;
+}
+
+function createRecordFromChromePasswordItem(item, baseRecord, now) {
+  return {
+    id: createId(),
+    title: baseRecord.title || normalizeBookmarkTitle(item.name, item.url),
+    url: item.url,
+    username: item.username,
+    accountTag: baseRecord.accountTag || "",
+    loginMethod: "password",
+    category: normalizeCategory(baseRecord.category),
+    password: item.password,
+    note: item.note,
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
+function addChromePasswordRecordToIndexes(record, indexes) {
+  const keys = getUrlMatchKeys(record.url);
+  if (keys.exact) {
+    addRecordToUrlIndex(indexes.exact, keys.exact, record);
+  }
+  if (keys.path) {
+    addRecordToUrlIndex(indexes.path, keys.path, record);
+  }
+  if (keys.host) {
+    addRecordToUrlIndex(indexes.host, keys.host, record);
+  }
+}
+
+function normalizeChromeUsername(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
 function getUrlMatchKeys(value) {
   const cleaned = String(value ?? "").trim();
   if (!cleaned) {
-    return { exact: "", path: "" };
+    return { exact: "", path: "", host: "" };
   }
 
   try {
@@ -1418,13 +1500,15 @@ function getUrlMatchKeys(value) {
     parsed.hash = "";
     return {
       exact: parsed.href.toLowerCase(),
-      path: `${parsed.origin}${parsed.pathname}`.toLowerCase()
+      path: `${parsed.origin}${parsed.pathname}`.toLowerCase(),
+      host: parsed.hostname.toLowerCase()
     };
   } catch (error) {
     const withoutHash = cleaned.split("#")[0].trim().toLowerCase();
     return {
       exact: withoutHash,
-      path: withoutHash.split("?")[0]
+      path: withoutHash.split("?")[0],
+      host: ""
     };
   }
 }
