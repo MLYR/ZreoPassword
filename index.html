@@ -218,8 +218,12 @@
             导入书签 HTML
             <input id="importInput" type="file" accept=".html,.htm,text/html,application/json,.json">
           </label>
+          <label class="ghost-button file-button">
+            导入 Chrome 密码 CSV
+            <input id="chromePasswordInput" type="file" accept=".csv,text/csv">
+          </label>
         </div>
-        <p class="settings-note">书签文件不包含密码，密码继续只保存在本地加密库里。</p>
+        <p class="settings-note">书签文件不包含密码；Chrome 密码 CSV 只按已有网址补全账号密码，不会新建记录。</p>
       </section>
 
       <section class="settings-section">

@@ -4,6 +4,7 @@ const SESSION_PASSWORD_KEY = "zreo-password-session-master";
 const IDLE_LOCK_KEY = "zreo-password-idle-minutes";
 const DEFAULT_CATEGORY = "未分类";
 const MAX_BOOKMARK_HTML_BYTES = 20 * 1024 * 1024;
+const MAX_CHROME_PASSWORD_CSV_BYTES = 10 * 1024 * 1024;
 
 const state = {
   records: [],
@@ -44,6 +45,7 @@ const els = {
   settingsButton: document.querySelector("#settingsButton"),
   exportButton: document.querySelector("#exportButton"),
   importInput: document.querySelector("#importInput"),
+  chromePasswordInput: document.querySelector("#chromePasswordInput"),
   searchInput: document.querySelector("#searchInput"),
   lockButton: document.querySelector("#lockButton"),
   sortSelect: document.querySelector("#sortSelect"),
@@ -1205,6 +1207,228 @@ async function importBookmarksHtml(event) {
   }
 }
 
+async function importChromePasswordsCsv(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  try {
+    if (file.size > MAX_CHROME_PASSWORD_CSV_BYTES) {
+      throw new Error("File too large");
+    }
+
+    const text = await file.text();
+    const result = await importChromePasswordsText(text);
+    if (result.updated > 0) {
+      showToast(`已更新 ${result.updated} 条，跳过 ${result.skipped} 条`);
+    } else {
+      showToast("没有匹配到现有网址，未导入任何密码");
+    }
+  } catch (error) {
+    console.error(error);
+    if (error && error.message === "File too large") {
+      showToast("导入失败：Chrome 密码 CSV 文件太大了");
+    } else if (error && error.message === "No passwords found") {
+      showToast("导入失败：没有识别到 Chrome 密码内容");
+    } else {
+      showToast("导入失败：请确认是 Chrome 导出的密码 CSV");
+    }
+  } finally {
+    event.target.value = "";
+  }
+}
+
+async function importChromePasswordsText(text) {
+  const items = parseChromePasswordCsv(text);
+  if (!items.length) {
+    throw new Error("No passwords found");
+  }
+
+  const now = new Date().toISOString();
+  const indexes = buildUrlRecordIndexes(state.records);
+  let updated = 0;
+  let skipped = 0;
+
+  items.forEach((item) => {
+    const target = findChromePasswordTarget(item, indexes);
+    if (!target) {
+      skipped += 1;
+      return;
+    }
+
+    // Chrome CSV 是明文密码来源，只补全已有网址记录，不创建新条目。
+    target.username = item.username;
+    target.password = item.password;
+    target.note = item.note;
+    target.loginMethod = "password";
+    target.updatedAt = now;
+    updated += 1;
+  });
+
+  if (updated > 0) {
+    await persistRecords();
+    render();
+  }
+
+  return { updated, skipped };
+}
+
+function parseChromePasswordCsv(text) {
+  const rows = parseCsvRows(String(text ?? "").replace(/^\uFEFF/, ""));
+  if (!rows.length) {
+    throw new Error("No passwords found");
+  }
+
+  const header = rows[0].map((cell) => cell.trim().toLowerCase());
+  const requiredFields = ["name", "url", "username", "password", "note"];
+  const fieldIndexes = requiredFields.reduce((result, fieldName) => {
+    const index = header.indexOf(fieldName);
+    if (index === -1) {
+      throw new Error("Invalid CSV");
+    }
+    result[fieldName] = index;
+    return result;
+  }, {});
+
+  return rows.slice(1)
+    .map((row) => ({
+      name: (row[fieldIndexes.name] || "").trim(),
+      url: (row[fieldIndexes.url] || "").trim(),
+      username: (row[fieldIndexes.username] || "").trim(),
+      password: row[fieldIndexes.password] || "",
+      note: (row[fieldIndexes.note] || "").trim()
+    }))
+    .filter((item) => item.url && (item.username || item.password || item.note));
+}
+
+function parseCsvRows(text) {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let inQuotes = false;
+
+  // 状态机解析 CSV，避免密码或备注里的逗号、引号、换行被错误拆开。
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const nextChar = text[index + 1];
+
+    if (inQuotes) {
+      if (char === "\"" && nextChar === "\"") {
+        cell += "\"";
+        index += 1;
+      } else if (char === "\"") {
+        inQuotes = false;
+      } else {
+        cell += char;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inQuotes = true;
+    } else if (char === ",") {
+      row.push(cell);
+      cell = "";
+    } else if (char === "\n" || char === "\r") {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+      if (char === "\r" && nextChar === "\n") {
+        index += 1;
+      }
+    } else {
+      cell += char;
+    }
+  }
+
+  if (inQuotes) {
+    throw new Error("Invalid CSV");
+  }
+
+  if (cell || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+
+  return rows.filter((cells) => cells.some((cellValue) => String(cellValue).trim()));
+}
+
+function buildUrlRecordIndexes(records) {
+  const exact = new Map();
+  const path = new Map();
+
+  records.forEach((record) => {
+    const keys = getUrlMatchKeys(record.url);
+    if (keys.exact) {
+      addRecordToUrlIndex(exact, keys.exact, record);
+    }
+    if (keys.path) {
+      addRecordToUrlIndex(path, keys.path, record);
+    }
+  });
+
+  return { exact, path };
+}
+
+function addRecordToUrlIndex(index, key, record) {
+  if (!index.has(key)) {
+    index.set(key, []);
+  }
+  index.get(key).push(record);
+}
+
+function findChromePasswordTarget(item, indexes) {
+  const keys = getUrlMatchKeys(item.url);
+  const candidates = [];
+  const seenIds = new Set();
+
+  // 先完整网址匹配，再用 origin + pathname 兜底，避免 query 差异漏匹配。
+  [indexes.exact.get(keys.exact), indexes.path.get(keys.path)].forEach((records) => {
+    (records || []).forEach((record) => {
+      if (!seenIds.has(record.id)) {
+        seenIds.add(record.id);
+        candidates.push(record);
+      }
+    });
+  });
+
+  if (!candidates.length) {
+    return null;
+  }
+
+  const username = item.username.trim().toLowerCase();
+  if (username) {
+    const sameUsername = candidates.filter((record) => String(record.username ?? "").trim().toLowerCase() === username);
+    if (sameUsername.length === 1) {
+      return sameUsername[0];
+    }
+  }
+
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+function getUrlMatchKeys(value) {
+  const cleaned = String(value ?? "").trim();
+  if (!cleaned) {
+    return { exact: "", path: "" };
+  }
+
+  try {
+    const parsed = new URL(cleaned);
+    parsed.hash = "";
+    return {
+      exact: parsed.href.toLowerCase(),
+      path: `${parsed.origin}${parsed.pathname}`.toLowerCase()
+    };
+  } catch (error) {
+    const withoutHash = cleaned.split("#")[0].trim().toLowerCase();
+    return {
+      exact: withoutHash,
+      path: withoutHash.split("?")[0]
+    };
+  }
+}
+
 async function importBookmarksFromDesktop() {
   if (!window.desktopBridge?.pickFile || !window.desktopBridge?.readTextFile) {
     els.importInput.click();
@@ -1491,6 +1715,7 @@ function bindEvents() {
   els.lockButton.addEventListener("click", lockVault);
   els.exportButton.addEventListener("click", exportBookmarksHtml);
   els.importInput.addEventListener("change", importBookmarksHtml);
+  els.chromePasswordInput.addEventListener("change", importChromePasswordsCsv);
   els.renameCategoryButton.addEventListener("click", openRenameCategoryDialog);
   els.removeCategoryButton.addEventListener("click", openDeleteCategoryDialog);
   els.renameCategoryForm.addEventListener("submit", saveCategoryRename);
