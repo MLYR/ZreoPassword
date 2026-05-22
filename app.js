@@ -1,6 +1,7 @@
 const STORAGE_KEY = "zreo-password-vault-v1";
 const SESSION_KEY = "zreo-password-session-key";
 const IDLE_LOCK_KEY = "zreo-password-idle-minutes";
+const THEME_KEY = "zreo-password-theme";
 const DEFAULT_CATEGORY = "未分类";
 const MAX_BOOKMARK_HTML_BYTES = 20 * 1024 * 1024;
 const MAX_CHROME_PASSWORD_CSV_BYTES = 10 * 1024 * 1024;
@@ -34,6 +35,8 @@ const els = {
   confirmPasswordInput: document.querySelector("#confirmPasswordInput"),
   idleLockInput: document.querySelector("#idleLockInput"),
   idleLockValue: document.querySelector("#idleLockValue"),
+  themeDarkInput: document.querySelector("#themeDarkInput"),
+  themeLightInput: document.querySelector("#themeLightInput"),
   newItemButton: document.querySelector("#newItemButton"),
   batchToolbar: document.querySelector("#batchToolbar"),
   batchModeButton: document.querySelector("#batchModeButton"),
@@ -1238,6 +1241,7 @@ async function refreshDesktopVaultPresence() {
 }
 
 async function loadStoredSettings() {
+  applyTheme(localStorage.getItem(THEME_KEY) || "dark");
   if (!els.idleLockInput) return;
   const saved = isDesktopVaultAvailable()
     ? await window.desktopBridge.vault.getSetting(IDLE_LOCK_KEY)
@@ -1246,6 +1250,20 @@ async function loadStoredSettings() {
     els.idleLockInput.value = saved;
     if (els.idleLockValue) els.idleLockValue.textContent = saved;
   }
+}
+
+function applyTheme(theme) {
+  const nextTheme = theme === "light" ? "light" : "dark";
+  // 主题只影响本机界面观感，不进入加密密码库，避免和敏感数据生命周期绑定。
+  document.documentElement.dataset.theme = nextTheme;
+  if (els.themeDarkInput) els.themeDarkInput.checked = nextTheme === "dark";
+  if (els.themeLightInput) els.themeLightInput.checked = nextTheme === "light";
+}
+
+function saveTheme(theme) {
+  const nextTheme = theme === "light" ? "light" : "dark";
+  localStorage.setItem(THEME_KEY, nextTheme);
+  applyTheme(nextTheme);
 }
 
 function configureAuthScreen() {
@@ -1308,6 +1326,7 @@ function openSettingsDialog() {
   els.currentMasterPasswordInput.value = "";
   els.newMasterPasswordInput.value = "";
   els.confirmNewMasterPasswordInput.value = "";
+  applyTheme(localStorage.getItem(THEME_KEY) || document.documentElement.dataset.theme);
   els.settingsDialog.showModal();
 }
 
@@ -2040,6 +2059,12 @@ function bindEvents() {
       if (state.key) startIdleTimer();
     });
   }
+  [els.themeDarkInput, els.themeLightInput].forEach((input) => {
+    if (!input) return;
+    input.addEventListener("change", () => {
+      if (input.checked) saveTheme(input.value);
+    });
+  });
   els.searchInput.addEventListener("input", render);
   els.sortSelect.addEventListener("change", render);
   els.lockButton.addEventListener("click", lockVault);
