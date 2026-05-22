@@ -1,6 +1,7 @@
 const { app, BrowserWindow, Menu, dialog, shell, ipcMain } = require("electron");
 const path = require("path");
 const fs = require("fs/promises");
+const vaultStore = require("./vault-store.cjs");
 
 const isDev = Boolean(process.env.ELECTRON_START_URL);
 
@@ -189,6 +190,17 @@ app.whenReady().then(() => {
     }
     return { canceled: false, filePaths: result.filePaths };
   });
+
+  ipcMain.handle("vault:getMeta", async () => vaultStore.getMeta(app));
+  ipcMain.handle("vault:initialize", async (_event, meta = {}) => vaultStore.initializeVault(app, meta));
+  ipcMain.handle("vault:updateMeta", async (_event, meta = {}) => vaultStore.updateMeta(app, meta));
+  ipcMain.handle("vault:hasRecords", async () => vaultStore.hasRecords(app));
+  ipcMain.handle("vault:listRecords", async () => vaultStore.listRecords(app));
+  ipcMain.handle("vault:replaceAllRecords", async (_event, records = []) => vaultStore.replaceAllRecords(app, records));
+  ipcMain.handle("vault:upsertRecords", async (_event, records = []) => vaultStore.upsertRecords(app, records));
+  ipcMain.handle("vault:deleteRecords", async (_event, ids = []) => vaultStore.deleteRecords(app, ids));
+  ipcMain.handle("vault:getSetting", async (_event, key) => vaultStore.getSetting(app, key));
+  ipcMain.handle("vault:setSetting", async (_event, key, value) => vaultStore.setSetting(app, key, value));
 
   createWindow();
 });

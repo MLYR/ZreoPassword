@@ -45,5 +45,8 @@
   "devDependencies": {
     "electron": "^36.2.0",
     "electron-builder": "^26.0.12"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0"
   }
 }

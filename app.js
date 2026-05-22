@@ -1,6 +1,5 @@
 const STORAGE_KEY = "zreo-password-vault-v1";
 const SESSION_KEY = "zreo-password-session-key";
-const SESSION_PASSWORD_KEY = "zreo-password-session-master";
 const IDLE_LOCK_KEY = "zreo-password-idle-minutes";
 const DEFAULT_CATEGORY = "未分类";
 const MAX_BOOKMARK_HTML_BYTES = 20 * 1024 * 1024;
@@ -21,6 +20,7 @@ const state = {
 };
 
 let idleTimer = null;
+let sessionPassword = "";
 
 const els = {
   authScreen: document.querySelector("#authScreen"),
@@ -107,13 +107,26 @@ const els = {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+function isDesktopVaultAvailable() {
+  return Boolean(window.desktopBridge?.vault);
+}
+
 function getStoredVault() {
   const raw = localStorage.getItem(STORAGE_KEY);
   return raw ? JSON.parse(raw) : null;
 }
 
 function bytesToBase64(bytes) {
-  return btoa(String.fromCharCode(...new Uint8Array(bytes)));
+  const bytesView = new Uint8Array(bytes);
+  let binary = "";
+  const chunkSize = 0x8000;
+
+  // 大批量导入后密文会变大，必须分块转字符串，避免展开参数触发调用栈溢出。
+  for (let index = 0; index < bytesView.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytesView.subarray(index, index + chunkSize));
+  }
+
+  return btoa(binary);
 }
 
 function base64ToBytes(value) {
@@ -183,7 +196,83 @@ async function decryptVault(vault, key) {
   return JSON.parse(decoder.decode(decrypted));
 }
 
+function getRecordHost(record) {
+  try {
+    return record.url ? new URL(record.url).hostname.toLowerCase() : "";
+  } catch {
+    return "";
+  }
+}
+
+function getRecordPublicFields(record) {
+  return {
+    id: record.id,
+    title: record.title || "未命名",
+    url: record.url || "",
+    host: getRecordHost(record),
+    category: normalizeCategory(record.category || ""),
+    accountTag: record.accountTag || "",
+    loginMethod: getRecordLoginMethod(record),
+    usernameIndex: String(record.username || "").trim().toLowerCase(),
+    createdAt: record.createdAt || new Date().toISOString(),
+    updatedAt: record.updatedAt || new Date().toISOString()
+  };
+}
+
+async function encryptRecordForSqlite(record) {
+  // SQLite 桌面端按单条记录加密，避免每次保存整库重写。
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    state.key,
+    encoder.encode(JSON.stringify(record))
+  );
+  return {
+    ...getRecordPublicFields(record),
+    iv: bytesToBase64(iv),
+    encryptedContent: bytesToBase64(encrypted)
+  };
+}
+
+async function decryptRecordFromSqlite(row) {
+  const encrypted = base64ToBytes(row.encryptedContent);
+  const iv = base64ToBytes(row.iv);
+  const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, state.key, encrypted);
+  const record = JSON.parse(decoder.decode(decrypted));
+  return {
+    ...record,
+    id: row.id,
+    title: row.title,
+    url: row.url,
+    category: row.category,
+    accountTag: row.accountTag,
+    loginMethod: row.loginMethod,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
+async function readDesktopRecords() {
+  const rows = await window.desktopBridge.vault.listRecords();
+  return Promise.all((rows || []).map(decryptRecordFromSqlite));
+}
+
+async function saveDesktopRecords(records) {
+  const rows = await Promise.all(records.map(encryptRecordForSqlite));
+  await window.desktopBridge.vault.upsertRecords(rows);
+}
+
+async function replaceDesktopRecords(records) {
+  const rows = await Promise.all(records.map(encryptRecordForSqlite));
+  await window.desktopBridge.vault.replaceAllRecords(rows);
+}
+
 async function persistRecords() {
+  if (isDesktopVaultAvailable()) {
+    await saveDesktopRecords(state.records);
+    return;
+  }
+
   const existing = getStoredVault();
   const salt = existing ? base64ToBytes(existing.salt) : crypto.getRandomValues(new Uint8Array(16));
   const vault = await encryptVault(state.records, state.key, salt);
@@ -191,6 +280,21 @@ async function persistRecords() {
 }
 
 async function unlockWithPassword(password, options = {}) {
+  if (isDesktopVaultAvailable()) {
+    const meta = await window.desktopBridge.vault.getMeta();
+    if (!meta) {
+      throw new Error("Vault not found");
+    }
+    state.key = await deriveKey(password, base64ToBytes(meta.salt));
+    state.records = await readDesktopRecords();
+    state.selectedId = state.records[0] ? state.records[0].id : null;
+    if (options.rememberSession) {
+      sessionPassword = password;
+      localStorage.setItem(SESSION_KEY, "unlocked");
+    }
+    return;
+  }
+
   const storedVault = getStoredVault();
   if (!storedVault) {
     throw new Error("Vault not found");
@@ -204,27 +308,28 @@ async function unlockWithPassword(password, options = {}) {
   state.selectedId = state.records[0] ? state.records[0].id : null;
 
   if (options.rememberSession) {
-    // 仅保存在当前标签页会话中，刷新可用，关闭标签页后由浏览器清理。
+    sessionPassword = password;
     localStorage.setItem(SESSION_KEY, "unlocked");
-    localStorage.setItem(SESSION_PASSWORD_KEY, password);
   }
 }
 
 async function restoreSessionUnlock() {
-  const password = localStorage.getItem(SESSION_PASSWORD_KEY);
-  if (!password || !getStoredVault()) {
+  const hasVault = isDesktopVaultAvailable()
+    ? Boolean(await window.desktopBridge.vault.getMeta())
+    : Boolean(getStoredVault());
+  if (!sessionPassword || !hasVault) {
     return false;
   }
 
   try {
-    await unlockWithPassword(password, { rememberSession: true });
+    await unlockWithPassword(sessionPassword, { rememberSession: true });
     els.authScreen.classList.add("is-hidden");
     render();
     return true;
   } catch (error) {
     console.error(error);
     localStorage.removeItem(SESSION_KEY);
-    localStorage.removeItem(SESSION_PASSWORD_KEY);
+    sessionPassword = "";
     return false;
   }
 }
@@ -239,7 +344,7 @@ function showToast(message) {
 }
 
 function normalizeCategory(value) {
-  return value.trim() || DEFAULT_CATEGORY;
+  return String(value ?? "").trim() || DEFAULT_CATEGORY;
 }
 
 function scorePassword(password) {
@@ -782,14 +887,33 @@ async function deleteSelectedRecord() {
   if (!confirmed) return;
 
   state.records = state.records.filter((item) => item.id !== state.selectedId);
+  if (isDesktopVaultAvailable()) {
+    await window.desktopBridge.vault.deleteRecords([record.id]);
+  } else {
+    await persistRecords();
+  }
   state.selectedId = state.records[0] ? state.records[0].id : null;
-  await persistRecords();
   els.itemDialog.close();
   render();
   showToast("记录已删除");
 }
 
 async function validateMasterPassword(password) {
+  if (isDesktopVaultAvailable()) {
+    const meta = await window.desktopBridge.vault.getMeta();
+    if (!meta) {
+      throw new Error("Vault not found");
+    }
+    const testKey = await deriveKey(password, base64ToBytes(meta.salt));
+    const rows = await window.desktopBridge.vault.listRecords();
+    if (rows && rows[0]) {
+      const encrypted = base64ToBytes(rows[0].encryptedContent);
+      const iv = base64ToBytes(rows[0].iv);
+      await crypto.subtle.decrypt({ name: "AES-GCM", iv }, testKey, encrypted);
+    }
+    return;
+  }
+
   const storedVault = getStoredVault();
   if (!storedVault) {
     throw new Error("Vault not found");
@@ -865,6 +989,9 @@ async function deleteCategoryRecords(event) {
 
   try {
     await validateMasterPassword(password);
+    const deletedIds = state.records
+      .filter((record) => record.category === categoryName)
+      .map((record) => record.id);
     state.records = state.records.filter((record) => record.category !== categoryName);
     if (state.activeCategory === categoryName) {
       state.activeCategory = "全部";
@@ -872,7 +999,11 @@ async function deleteCategoryRecords(event) {
     if (!state.records.some((record) => record.id === state.selectedId)) {
       state.selectedId = state.records[0] ? state.records[0].id : null;
     }
-    await persistRecords();
+    if (isDesktopVaultAvailable()) {
+      await window.desktopBridge.vault.deleteRecords(deletedIds);
+    } else {
+      await persistRecords();
+    }
     els.deleteCategoryDialog.close();
     render();
     showToast("分类及其记录已删除");
@@ -899,7 +1030,11 @@ async function deleteSelectedRecords() {
   if (!state.records.some((record) => record.id === state.selectedId)) {
     state.selectedId = state.records[0] ? state.records[0].id : null;
   }
-  await persistRecords();
+  if (isDesktopVaultAvailable()) {
+    await window.desktopBridge.vault.deleteRecords(ids);
+  } else {
+    await persistRecords();
+  }
   render();
   showToast("选中记录已删除");
 }
@@ -924,6 +1059,30 @@ async function changeMasterPassword() {
   }
 
   try {
+    if (isDesktopVaultAvailable()) {
+      await validateMasterPassword(currentPassword);
+      const newSalt = crypto.getRandomValues(new Uint8Array(16));
+      state.key = await deriveKey(newPassword, newSalt);
+      await replaceDesktopRecords(state.records);
+      await window.desktopBridge.vault.updateMeta({
+        salt: bytesToBase64(newSalt),
+        iterations: 210000,
+        updatedAt: new Date().toISOString()
+      });
+      sessionPassword = newPassword;
+      localStorage.setItem(SESSION_KEY, "unlocked");
+      els.currentMasterPasswordInput.value = "";
+      els.newMasterPasswordInput.value = "";
+      els.confirmNewMasterPasswordInput.value = "";
+      els.settingsMessage.textContent = "主密码已修改。";
+      window.setTimeout(() => {
+        els.settingsDialog.close();
+        els.settingsMessage.textContent = "";
+      }, 700);
+      showToast("主密码已修改");
+      return;
+    }
+
     const storedVault = getStoredVault();
     if (!storedVault) {
       els.settingsMessage.textContent = "还没有可修改的本地密码库。";
@@ -937,7 +1096,7 @@ async function changeMasterPassword() {
     const nextVault = await encryptVault(state.records, state.key, newSalt);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(nextVault));
     localStorage.setItem(SESSION_KEY, "unlocked");
-    localStorage.setItem(SESSION_PASSWORD_KEY, newPassword);
+    sessionPassword = newPassword;
     els.currentMasterPasswordInput.value = "";
     els.newMasterPasswordInput.value = "";
     els.confirmNewMasterPasswordInput.value = "";
@@ -978,23 +1137,27 @@ async function handleAuth(event) {
   event.preventDefault();
   els.authMessage.textContent = "";
   const password = els.masterPasswordInput.value;
-  const storedVault = getStoredVault();
 
   try {
-    if (!storedVault) {
-      if (password.length < 8) {
-        els.authMessage.textContent = "主密码至少 8 位。";
-        return;
-      }
-      const salt = crypto.getRandomValues(new Uint8Array(16));
-      state.key = await deriveKey(password, salt);
-      state.records = createStarterRecords();
-      state.selectedId = state.records[0].id;
-      const vault = await encryptVault(state.records, state.key, salt);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(vault));
-      localStorage.setItem(SESSION_PASSWORD_KEY, password);
+    if (isDesktopVaultAvailable()) {
+      await handleDesktopAuth(password);
     } else {
-      await unlockWithPassword(password, { rememberSession: true });
+      const storedVault = getStoredVault();
+      if (!storedVault) {
+        if (password.length < 8) {
+          els.authMessage.textContent = "主密码至少 8 位。";
+          return;
+        }
+        const salt = crypto.getRandomValues(new Uint8Array(16));
+        state.key = await deriveKey(password, salt);
+        state.records = createStarterRecords();
+        state.selectedId = state.records[0].id;
+        const vault = await encryptVault(state.records, state.key, salt);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(vault));
+        sessionPassword = password;
+      } else {
+        await unlockWithPassword(password, { rememberSession: true });
+      }
     }
 
     localStorage.setItem(SESSION_KEY, "unlocked");
@@ -1009,8 +1172,84 @@ async function handleAuth(event) {
   }
 }
 
+async function handleDesktopAuth(password) {
+  const meta = await window.desktopBridge.vault.getMeta();
+  const legacyVault = getStoredVault();
+
+  if (!meta) {
+    if (password.length < 8) {
+      els.authMessage.textContent = "主密码至少 8 位。";
+      throw new Error("Weak password");
+    }
+
+    if (legacyVault) {
+      const salt = base64ToBytes(legacyVault.salt);
+      state.key = await deriveKey(password, salt);
+      const payload = await decryptVault(legacyVault, state.key);
+      state.records = Array.isArray(payload.records) ? payload.records : [];
+      state.selectedId = state.records[0] ? state.records[0].id : null;
+      await window.desktopBridge.vault.initialize({
+        salt: legacyVault.salt,
+        iterations: legacyVault.iterations || 210000,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+      await replaceDesktopRecords(state.records);
+      sessionPassword = password;
+      showToast("已迁移到 SQLite 本地数据库");
+      return;
+    }
+
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    state.key = await deriveKey(password, salt);
+    state.records = createStarterRecords();
+    state.selectedId = state.records[0].id;
+    await window.desktopBridge.vault.initialize({
+      salt: bytesToBase64(salt),
+      iterations: 210000,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    await replaceDesktopRecords(state.records);
+    sessionPassword = password;
+    return;
+  }
+
+  await unlockWithPassword(password, { rememberSession: true });
+  if (!state.records.length && legacyVault) {
+    const payload = await decryptVault(legacyVault, state.key);
+    state.records = Array.isArray(payload.records) ? payload.records : [];
+    state.selectedId = state.records[0] ? state.records[0].id : null;
+    await replaceDesktopRecords(state.records);
+    showToast("已迁移旧版本地数据");
+  }
+}
+
+function getHasVaultCache() {
+  if (isDesktopVaultAvailable()) {
+    return window.__zreoHasDesktopVault === true || Boolean(getStoredVault());
+  }
+  return Boolean(getStoredVault());
+}
+
+async function refreshDesktopVaultPresence() {
+  if (!isDesktopVaultAvailable()) return;
+  window.__zreoHasDesktopVault = Boolean(await window.desktopBridge.vault.getMeta());
+}
+
+async function loadStoredSettings() {
+  if (!els.idleLockInput) return;
+  const saved = isDesktopVaultAvailable()
+    ? await window.desktopBridge.vault.getSetting(IDLE_LOCK_KEY)
+    : localStorage.getItem(IDLE_LOCK_KEY);
+  if (saved !== null && saved !== undefined) {
+    els.idleLockInput.value = saved;
+    if (els.idleLockValue) els.idleLockValue.textContent = saved;
+  }
+}
+
 function configureAuthScreen() {
-  const hasVault = Boolean(getStoredVault());
+  const hasVault = getHasVaultCache();
   els.authTitle.textContent = hasVault ? "解锁密码库" : "创建主密码";
   els.authDescription.textContent = hasVault
     ? "输入主密码解锁。也可在设置中开启自动锁定。"
@@ -1030,7 +1269,7 @@ function stopIdleTimer() {
 
 function startIdleTimer() {
   stopIdleTimer();
-  const minutes = parseInt(localStorage.getItem(IDLE_LOCK_KEY), 10) || 5;
+  const minutes = Number(els.idleLockInput ? els.idleLockInput.value : localStorage.getItem(IDLE_LOCK_KEY)) || 5;
   if (minutes <= 0) return;
   idleTimer = setTimeout(() => {
     if (state.key) {
@@ -1055,8 +1294,8 @@ function lockVault() {
   state.selectedRecordIds.clear();
   state.isBatchDeleteMode = false;
   state.contextCategoryName = "";
+  sessionPassword = "";
   localStorage.removeItem(SESSION_KEY);
-  localStorage.removeItem(SESSION_PASSWORD_KEY);
   closeCategoryContextMenu();
   configureAuthScreen();
   els.authScreen.classList.remove("is-hidden");
@@ -1122,6 +1361,15 @@ async function importBookmarksText(text) {
       const vault = JSON.parse(trimmed);
       if (!vault.salt || !vault.iv || !vault.content) {
         throw new Error("Invalid vault");
+      }
+      if (isDesktopVaultAvailable() && state.key) {
+        const payload = await decryptVault(vault, state.key);
+        state.records = Array.isArray(payload.records) ? payload.records : [];
+        state.selectedId = state.records[0] ? state.records[0].id : null;
+        await replaceDesktopRecords(state.records);
+        render();
+        showToast("旧版加密备份已迁移到 SQLite");
+        return true;
       }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(vault));
       showToast("旧版加密备份已导入，请用对应主密码解锁");
@@ -1781,18 +2029,16 @@ function bindEvents() {
     els.lengthValue.textContent = els.lengthInput.value;
   });
   if (els.idleLockInput) {
-    els.idleLockInput.addEventListener("input", () => {
+    els.idleLockInput.addEventListener("input", async () => {
       const val = els.idleLockInput.value;
       if (els.idleLockValue) els.idleLockValue.textContent = val;
-      localStorage.setItem(IDLE_LOCK_KEY, val);
+      if (isDesktopVaultAvailable()) {
+        await window.desktopBridge.vault.setSetting(IDLE_LOCK_KEY, val);
+      } else {
+        localStorage.setItem(IDLE_LOCK_KEY, val);
+      }
       if (state.key) startIdleTimer();
     });
-    // restore saved value
-    const saved = localStorage.getItem(IDLE_LOCK_KEY);
-    if (saved !== null) {
-      els.idleLockInput.value = saved;
-      if (els.idleLockValue) els.idleLockValue.textContent = saved;
-    }
   }
   els.searchInput.addEventListener("input", render);
   els.sortSelect.addEventListener("change", render);
@@ -1943,6 +2189,8 @@ function setupActivityListeners() {
 }
 
 async function init() {
+  await refreshDesktopVaultPresence();
+  await loadStoredSettings();
   configureAuthScreen();
   bindEvents();
   setupActivityListeners();
