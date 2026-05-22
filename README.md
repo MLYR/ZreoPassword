@@ -1,74 +1,145 @@
 # 小〇密码
 
-本项目是根据 `小〇密码.pages` 需求文档先落地的网页 MVP，同时已经补了 Electron 桌面框架骨架。当前以静态页面为核心，不依赖后端，核心数据使用浏览器本地存储，并通过 WebCrypto 做 AES-GCM 加密。
+小〇密码是一个本地优先的密码管理器，目前包含网页 MVP 和 Electron 桌面端框架。项目不依赖后端服务，桌面端主存储已经改为 SQLite，本地敏感数据继续使用 WebCrypto AES-GCM 加密。
 
-## 已实现
+## 当前状态
 
-- 主密码创建 / 解锁 / 锁定
-- 当前标签页不关闭时，刷新页面会自动恢复解锁状态
-- 设置面板：导入、导出、修改主密码、后续登录能力占位
-- AES-GCM + PBKDF2 本地加密保存
-- 密码记录新增、编辑、删除
-- 同一标题支持多账号记录，列表会按标题分组展示
-- 支持账号密码、Google、微信、GitHub、Apple 等登录方式标识
-- 支持标签 / 环境字段，例如个人、公司、测试、客户A
-- 密码字段可留空，适配第三方登录记录
+- 网页模式：使用浏览器 `localStorage` 作为 fallback。
+- 桌面模式：使用 Electron + SQLite，数据库文件位于系统用户数据目录。
+- 加密方式：PBKDF2 派生密钥，AES-GCM 加密数据。
+- 桌面端记录按单条加密保存，避免大数据量时整库重写。
+
+## 已实现功能
+
+- 主密码创建、解锁、手动锁定、空闲自动锁定
+- 密码记录新增、编辑、删除、批量删除
+- 分类筛选、分类右键重命名 / 删除
+- 同标题多账号分组展示
+- 支持账号密码、Google、微信、GitHub、Apple、手机号等登录方式标识
+- 密码可留空，适配第三方登录记录
 - 密码查看 / 隐藏切换
-- 双击记录列表可打开对应网址
-- 分类筛选、关键词搜索、排序
-- 密码强度提示、重复密码统计、最近更新统计
+- 双击记录打开对应网址
+- 关键词搜索、排序、密码强度提示、重复密码统计
 - 密码生成器
-- 复制用户名 / 网址 / 密码
+- 复制用户名 / 密码
 - Google / Chrome 书签 HTML 导入导出
-- 旧版加密 JSON 备份兼容导入
-- Electron 桌面框架骨架，后续可直接打包 macOS / Windows
+- Chrome 密码 CSV 导入，支持同域名多账号
+- 旧版加密 JSON vault 兼容导入 / 迁移
+- macOS / Windows 打包配置
+
+## 数据存储
+
+### 桌面端
+
+桌面端使用 SQLite：
+
+```text
+~/Library/Application Support/zreo-password/vault.sqlite3
+```
+
+主要表：
+
+```text
+vault_meta
+records
+settings
+```
+
+说明：
+
+- `vault_meta` 保存 salt、迭代次数、版本等元信息。
+- `records` 保存记录索引字段和单条加密内容。
+- `settings` 保存自动锁定时间等配置。
+- 记录的敏感字段在 `encryptedContent` 中加密保存。
+- 数据库文件只由 Electron 主进程访问，前端通过受控 IPC 调用。
+
+### 网页模式
+
+网页模式仍使用：
+
+```text
+localStorage -> zreo-password-vault-v1
+```
+
+该模式主要用于开发和预览。真正桌面软件以 SQLite 为主。
 
 ## 本地运行
 
-直接打开 `index.html` 可以预览。为了让 WebCrypto、剪贴板等浏览器能力更稳定，推荐在目录里启动本地服务：
-
-```bash
-python3 -m http.server 5173
-```
-
-然后访问：
-
-```text
-http://localhost:5173
-```
-
-## 桌面端运行与打包
-
-项目已经补了 Electron 框架骨架，后续可直接往 macOS / Windows 桌面程序方向走。
-
-先安装依赖：
+安装依赖：
 
 ```bash
 npm install
 ```
 
-启动桌面版开发：
+启动网页预览：
 
 ```bash
 npm run dev
 ```
 
-打包 macOS：
+访问：
+
+```text
+http://localhost:5173
+```
+
+启动桌面端：
+
+```bash
+npm run desktop
+```
+
+说明：`npm run dev` 只启动网页服务；`npm run desktop` 才会打开 Electron 桌面程序。
+
+## 打包
+
+macOS：
 
 ```bash
 npm run dist:mac
 ```
 
-打包 Windows：
+Windows x64：
 
 ```bash
 npm run dist:win
 ```
 
-说明：
-- `dev` 现在是桌面壳模式，代码改动后通常需要刷新窗口；Electron 主进程文件改动时需要重启应用。
-- 书签 HTML 只负责导入导出站点结构，不包含密码数据。
+Windows arm64：
 
-## 后续桌面端方向
+```bash
+npm run dist:win:arm64
+```
 
-当前已经有 Electron 桌面框架骨架，后续主要继续补系统托盘、自动锁定、文件备份、WebDAV / Dropbox / Drive 同步等能力。
+全部打包：
+
+```bash
+npm run dist:all
+```
+
+## 原生依赖说明
+
+项目使用 `better-sqlite3`。这是原生模块，Electron 版本变化后可能需要重新编译：
+
+```bash
+npm rebuild better-sqlite3 --runtime=electron --target=36.2.0 --disturl=https://electronjs.org/headers
+```
+
+如果普通 Node 直接 `require("better-sqlite3")` 出现 ABI 不匹配，而 Electron 能正常启动，通常是因为模块已经按 Electron ABI 编译。
+
+## 安全说明
+
+- 主密码不上传。
+- 桌面端不再把主密码写入 `localStorage`。
+- 手动锁定或自动锁定后会清空内存中的密钥和记录。
+- 当前未接入系统钥匙串；后续可接 macOS Keychain / Windows Credential Manager。
+- 当前暂未使用 SQLCipher，数据库中敏感字段由应用层 AES-GCM 加密。
+
+## 后续方向
+
+- SQLite 查询层分页和虚拟列表，支持更大数据量
+- 导入任务进度条和可取消导入
+- 系统托盘和后台自动锁定
+- 数据库备份 / 恢复
+- WebDAV、Dropbox、Google Drive 等同步能力
+- macOS Keychain / Windows Credential Manager 集成
