@@ -3,8 +3,11 @@ const SESSION_KEY = "zreo-password-session-key";
 const IDLE_LOCK_KEY = "zreo-password-idle-minutes";
 const THEME_KEY = "zreo-password-theme";
 const DEFAULT_CATEGORY = "未分类";
+const DEFAULT_KDF_ITERATIONS = 210000;
 const MAX_BOOKMARK_HTML_BYTES = 20 * 1024 * 1024;
 const MAX_CHROME_PASSWORD_CSV_BYTES = 10 * 1024 * 1024;
+const MAX_BACKUP_JSON_BYTES = 20 * 1024 * 1024;
+const CLIPBOARD_PASSWORD_CLEAR_MS = 60 * 1000;
 
 const state = {
   records: [],
@@ -48,6 +51,8 @@ const els = {
   settingsButton: document.querySelector("#settingsButton"),
   exportButton: document.querySelector("#exportButton"),
   importInput: document.querySelector("#importInput"),
+  exportBackupButton: document.querySelector("#exportBackupButton"),
+  importBackupInput: document.querySelector("#importBackupInput"),
   chromePasswordInput: document.querySelector("#chromePasswordInput"),
   searchInput: document.querySelector("#searchInput"),
   lockButton: document.querySelector("#lockButton"),
@@ -143,7 +148,12 @@ function createId() {
   return `item-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-async function deriveKey(password, salt) {
+function normalizeIterations(value) {
+  const iterations = Number(value);
+  return Number.isFinite(iterations) && iterations > 0 ? iterations : DEFAULT_KDF_ITERATIONS;
+}
+
+async function deriveKey(password, salt, iterations = DEFAULT_KDF_ITERATIONS) {
   // 使用主密码派生 AES 密钥，主密码本身不落盘。
   const baseKey = await crypto.subtle.importKey(
     "raw",
@@ -157,7 +167,7 @@ async function deriveKey(password, salt) {
     {
       name: "PBKDF2",
       salt,
-      iterations: 210000,
+      iterations: normalizeIterations(iterations),
       hash: "SHA-256"
     },
     baseKey,
@@ -167,7 +177,7 @@ async function deriveKey(password, salt) {
   );
 }
 
-async function encryptVault(records, key, salt) {
+async function encryptVault(records, key, salt, iterations = DEFAULT_KDF_ITERATIONS) {
   // 每次保存都生成新的 IV，避免复用 AES-GCM nonce。
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const payload = {
@@ -185,7 +195,7 @@ async function encryptVault(records, key, salt) {
     version: 1,
     algorithm: "AES-GCM",
     kdf: "PBKDF2-SHA256",
-    iterations: 210000,
+    iterations: normalizeIterations(iterations),
     salt: bytesToBase64(salt),
     iv: bytesToBase64(iv),
     content: bytesToBase64(encrypted)
@@ -197,6 +207,37 @@ async function decryptVault(vault, key) {
   const iv = base64ToBytes(vault.iv);
   const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, encrypted);
   return JSON.parse(decoder.decode(decrypted));
+}
+
+async function createVaultVerifier(key) {
+  // verifier 是一段固定用途密文，用来验证主密码，即使空库也能拒绝错误密码。
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const payload = {
+    purpose: "zreo-password-master-verifier",
+    version: 1
+  };
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    encoder.encode(JSON.stringify(payload))
+  );
+  return {
+    verifierIv: bytesToBase64(iv),
+    verifierContent: bytesToBase64(encrypted)
+  };
+}
+
+async function validateVaultVerifier(meta, key) {
+  if (!meta?.verifierIv || !meta?.verifierContent) {
+    throw new Error("Missing verifier");
+  }
+  const encrypted = base64ToBytes(meta.verifierContent);
+  const iv = base64ToBytes(meta.verifierIv);
+  const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, encrypted);
+  const payload = JSON.parse(decoder.decode(decrypted));
+  if (payload.purpose !== "zreo-password-master-verifier") {
+    throw new Error("Invalid verifier");
+  }
 }
 
 function getRecordHost(record) {
@@ -222,12 +263,12 @@ function getRecordPublicFields(record) {
   };
 }
 
-async function encryptRecordForSqlite(record) {
+async function encryptRecordForSqlite(record, key = state.key) {
   // SQLite 桌面端按单条记录加密，避免每次保存整库重写。
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encrypted = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv },
-    state.key,
+    key,
     encoder.encode(JSON.stringify(record))
   );
   return {
@@ -255,19 +296,35 @@ async function decryptRecordFromSqlite(row) {
   };
 }
 
-async function readDesktopRecords() {
-  const rows = await window.desktopBridge.vault.listRecords();
-  return Promise.all((rows || []).map(decryptRecordFromSqlite));
+async function readDesktopRecords(rows) {
+  const sourceRows = rows || await window.desktopBridge.vault.listRecords();
+  return Promise.all((sourceRows || []).map(decryptRecordFromSqlite));
 }
 
-async function saveDesktopRecords(records) {
-  const rows = await Promise.all(records.map(encryptRecordForSqlite));
+async function saveDesktopRecords(records, key = state.key) {
+  const rows = await Promise.all(records.map((record) => encryptRecordForSqlite(record, key)));
   await window.desktopBridge.vault.upsertRecords(rows);
 }
 
-async function replaceDesktopRecords(records) {
-  const rows = await Promise.all(records.map(encryptRecordForSqlite));
+async function replaceDesktopRecords(records, key = state.key) {
+  const rows = await Promise.all(records.map((record) => encryptRecordForSqlite(record, key)));
   await window.desktopBridge.vault.replaceAllRecords(rows);
+}
+
+async function replaceDesktopRecordsWithMeta(records, meta, key = state.key) {
+  const rows = await Promise.all(records.map((record) => encryptRecordForSqlite(record, key)));
+  await window.desktopBridge.vault.replaceAllRecordsWithMeta(rows, meta);
+}
+
+async function ensureDesktopVerifier(meta) {
+  if (!isDesktopVaultAvailable() || meta?.verifierIv || !state.key) {
+    return;
+  }
+  const verifier = await createVaultVerifier(state.key);
+  await window.desktopBridge.vault.updateMeta({
+    ...verifier,
+    updatedAt: new Date().toISOString()
+  });
 }
 
 async function persistRecords() {
@@ -278,7 +335,8 @@ async function persistRecords() {
 
   const existing = getStoredVault();
   const salt = existing ? base64ToBytes(existing.salt) : crypto.getRandomValues(new Uint8Array(16));
-  const vault = await encryptVault(state.records, state.key, salt);
+  const iterations = normalizeIterations(existing?.iterations);
+  const vault = await encryptVault(state.records, state.key, salt, iterations);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(vault));
 }
 
@@ -288,8 +346,17 @@ async function unlockWithPassword(password, options = {}) {
     if (!meta) {
       throw new Error("Vault not found");
     }
-    state.key = await deriveKey(password, base64ToBytes(meta.salt));
-    state.records = await readDesktopRecords();
+    state.key = await deriveKey(password, base64ToBytes(meta.salt), meta.iterations);
+    const hasVerifier = Boolean(meta.verifierIv && meta.verifierContent);
+    if (hasVerifier) {
+      await validateVaultVerifier(meta, state.key);
+    }
+    const rows = await window.desktopBridge.vault.listRecords();
+    if (!hasVerifier && !rows.length) {
+      throw new Error("Missing verifier");
+    }
+    state.records = await readDesktopRecords(rows);
+    await ensureDesktopVerifier(meta);
     state.selectedId = state.records[0] ? state.records[0].id : null;
     if (options.rememberSession) {
       sessionPassword = password;
@@ -304,7 +371,7 @@ async function unlockWithPassword(password, options = {}) {
   }
 
   const salt = base64ToBytes(storedVault.salt);
-  const key = await deriveKey(password, salt);
+  const key = await deriveKey(password, salt, storedVault.iterations);
   const payload = await decryptVault(storedVault, key);
   state.key = key;
   state.records = Array.isArray(payload.records) ? payload.records : [];
@@ -907,21 +974,26 @@ async function validateMasterPassword(password) {
     if (!meta) {
       throw new Error("Vault not found");
     }
-    const testKey = await deriveKey(password, base64ToBytes(meta.salt));
+    const testKey = await deriveKey(password, base64ToBytes(meta.salt), meta.iterations);
+    if (meta.verifierIv && meta.verifierContent) {
+      await validateVaultVerifier(meta, testKey);
+      return;
+    }
     const rows = await window.desktopBridge.vault.listRecords();
     if (rows && rows[0]) {
       const encrypted = base64ToBytes(rows[0].encryptedContent);
       const iv = base64ToBytes(rows[0].iv);
       await crypto.subtle.decrypt({ name: "AES-GCM", iv }, testKey, encrypted);
+      return;
     }
-    return;
+    throw new Error("Missing verifier");
   }
 
   const storedVault = getStoredVault();
   if (!storedVault) {
     throw new Error("Vault not found");
   }
-  const key = await deriveKey(password, base64ToBytes(storedVault.salt));
+  const key = await deriveKey(password, base64ToBytes(storedVault.salt), storedVault.iterations);
   await decryptVault(storedVault, key);
 }
 
@@ -1065,13 +1137,16 @@ async function changeMasterPassword() {
     if (isDesktopVaultAvailable()) {
       await validateMasterPassword(currentPassword);
       const newSalt = crypto.getRandomValues(new Uint8Array(16));
-      state.key = await deriveKey(newPassword, newSalt);
-      await replaceDesktopRecords(state.records);
-      await window.desktopBridge.vault.updateMeta({
+      const iterations = DEFAULT_KDF_ITERATIONS;
+      const nextKey = await deriveKey(newPassword, newSalt, iterations);
+      const verifier = await createVaultVerifier(nextKey);
+      await replaceDesktopRecordsWithMeta(state.records, {
         salt: bytesToBase64(newSalt),
-        iterations: 210000,
+        iterations,
+        ...verifier,
         updatedAt: new Date().toISOString()
-      });
+      }, nextKey);
+      state.key = nextKey;
       sessionPassword = newPassword;
       localStorage.setItem(SESSION_KEY, "unlocked");
       els.currentMasterPasswordInput.value = "";
@@ -1092,11 +1167,11 @@ async function changeMasterPassword() {
       return;
     }
 
-    const currentKey = await deriveKey(currentPassword, base64ToBytes(storedVault.salt));
+    const currentKey = await deriveKey(currentPassword, base64ToBytes(storedVault.salt), storedVault.iterations);
     await decryptVault(storedVault, currentKey);
     const newSalt = crypto.getRandomValues(new Uint8Array(16));
-    state.key = await deriveKey(newPassword, newSalt);
-    const nextVault = await encryptVault(state.records, state.key, newSalt);
+    state.key = await deriveKey(newPassword, newSalt, DEFAULT_KDF_ITERATIONS);
+    const nextVault = await encryptVault(state.records, state.key, newSalt, DEFAULT_KDF_ITERATIONS);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(nextVault));
     localStorage.setItem(SESSION_KEY, "unlocked");
     sessionPassword = newPassword;
@@ -1127,13 +1202,30 @@ function generatePassword() {
   els.loginMethodInput.value = "password";
 }
 
-async function copyToClipboard(value, successMessage) {
+async function copyToClipboard(value, successMessage, options = {}) {
   if (!value) {
     showToast("没有可复制的内容");
     return;
   }
   await navigator.clipboard.writeText(value);
+  if (options.clearPassword) {
+    scheduleClipboardPasswordClear(value);
+  }
   showToast(successMessage);
+}
+
+function scheduleClipboardPasswordClear(value) {
+  window.setTimeout(async () => {
+    try {
+      const current = await navigator.clipboard.readText();
+      if (current === value) {
+        // 只在剪贴板仍是本次密码时清空，避免覆盖用户后续复制的新内容。
+        await navigator.clipboard.writeText("");
+      }
+    } catch (error) {
+      console.warn("Unable to clear clipboard", error);
+    }
+  }, CLIPBOARD_PASSWORD_CLEAR_MS);
 }
 
 async function handleAuth(event) {
@@ -1152,10 +1244,10 @@ async function handleAuth(event) {
           return;
         }
         const salt = crypto.getRandomValues(new Uint8Array(16));
-        state.key = await deriveKey(password, salt);
+        state.key = await deriveKey(password, salt, DEFAULT_KDF_ITERATIONS);
         state.records = createStarterRecords();
-        state.selectedId = state.records[0].id;
-        const vault = await encryptVault(state.records, state.key, salt);
+        state.selectedId = state.records[0] ? state.records[0].id : null;
+        const vault = await encryptVault(state.records, state.key, salt, DEFAULT_KDF_ITERATIONS);
         localStorage.setItem(STORAGE_KEY, JSON.stringify(vault));
         sessionPassword = password;
       } else {
@@ -1187,13 +1279,16 @@ async function handleDesktopAuth(password) {
 
     if (legacyVault) {
       const salt = base64ToBytes(legacyVault.salt);
-      state.key = await deriveKey(password, salt);
+      const iterations = normalizeIterations(legacyVault.iterations);
+      state.key = await deriveKey(password, salt, iterations);
       const payload = await decryptVault(legacyVault, state.key);
       state.records = Array.isArray(payload.records) ? payload.records : [];
       state.selectedId = state.records[0] ? state.records[0].id : null;
+      const verifier = await createVaultVerifier(state.key);
       await window.desktopBridge.vault.initialize({
         salt: legacyVault.salt,
-        iterations: legacyVault.iterations || 210000,
+        iterations,
+        ...verifier,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       });
@@ -1204,12 +1299,14 @@ async function handleDesktopAuth(password) {
     }
 
     const salt = crypto.getRandomValues(new Uint8Array(16));
-    state.key = await deriveKey(password, salt);
+    state.key = await deriveKey(password, salt, DEFAULT_KDF_ITERATIONS);
     state.records = createStarterRecords();
-    state.selectedId = state.records[0].id;
+    state.selectedId = state.records[0] ? state.records[0].id : null;
+    const verifier = await createVaultVerifier(state.key);
     await window.desktopBridge.vault.initialize({
       salt: bytesToBase64(salt),
-      iterations: 210000,
+      iterations: DEFAULT_KDF_ITERATIONS,
+      ...verifier,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     });
@@ -1220,7 +1317,8 @@ async function handleDesktopAuth(password) {
 
   await unlockWithPassword(password, { rememberSession: true });
   if (!state.records.length && legacyVault) {
-    const payload = await decryptVault(legacyVault, state.key);
+    const legacyKey = await deriveKey(password, base64ToBytes(legacyVault.salt), legacyVault.iterations);
+    const payload = await decryptVault(legacyVault, legacyKey);
     state.records = Array.isArray(payload.records) ? payload.records : [];
     state.selectedId = state.records[0] ? state.records[0].id : null;
     await replaceDesktopRecords(state.records);
@@ -1368,6 +1466,104 @@ async function exportBookmarksHtml() {
   }
 }
 
+async function exportEncryptedBackupJson() {
+  try {
+    if (!state.key) {
+      showToast("请先解锁密码库");
+      return;
+    }
+
+    let salt;
+    let iterations = DEFAULT_KDF_ITERATIONS;
+    if (isDesktopVaultAvailable()) {
+      const meta = await window.desktopBridge.vault.getMeta();
+      salt = base64ToBytes(meta.salt);
+      iterations = normalizeIterations(meta.iterations);
+    } else {
+      const existing = getStoredVault();
+      salt = existing ? base64ToBytes(existing.salt) : crypto.getRandomValues(new Uint8Array(16));
+      iterations = normalizeIterations(existing?.iterations);
+    }
+
+    const backup = await encryptVault(state.records, state.key, salt, iterations);
+    const content = `${JSON.stringify(backup, null, 2)}\n`;
+    const fileName = `zreo-password-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    if (window.desktopBridge?.saveTextFile) {
+      const result = await window.desktopBridge.saveTextFile({
+        title: "导出加密备份 JSON",
+        defaultPath: fileName,
+        mimeType: "application/json",
+        content
+      });
+      if (!result || result.canceled) return;
+      showToast("加密备份已导出");
+      return;
+    }
+
+    const blob = new Blob([content], { type: "application/json;charset=UTF-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    showToast("加密备份已导出");
+  } catch (error) {
+    console.error(error);
+    showToast("导出失败：无法生成加密备份");
+  }
+}
+
+async function decryptImportedVault(vault) {
+  if (!vault.salt || !vault.iv || !vault.content) {
+    throw new Error("Invalid vault");
+  }
+  const key = sessionPassword
+    ? await deriveKey(sessionPassword, base64ToBytes(vault.salt), vault.iterations)
+    : state.key;
+  return decryptVault(vault, key);
+}
+
+async function importEncryptedBackupText(text) {
+  const vault = JSON.parse(String(text ?? "").trim());
+  const payload = await decryptImportedVault(vault);
+  state.records = Array.isArray(payload.records) ? payload.records : [];
+  state.selectedId = state.records[0] ? state.records[0].id : null;
+  state.visiblePasswordIds.clear();
+  state.selectedRecordIds.clear();
+  state.isBatchDeleteMode = false;
+  if (isDesktopVaultAvailable()) {
+    await replaceDesktopRecords(state.records);
+  } else {
+    await persistRecords();
+  }
+  render();
+  showToast(`已恢复 ${state.records.length} 条加密记录`);
+  return true;
+}
+
+async function importEncryptedBackupJson(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  try {
+    if (file.size > MAX_BACKUP_JSON_BYTES) {
+      throw new Error("File too large");
+    }
+    const text = await file.text();
+    await importEncryptedBackupText(text);
+  } catch (error) {
+    console.error(error);
+    if (error && error.message === "File too large") {
+      showToast("导入失败：备份文件太大了");
+    } else {
+      showToast("导入失败：请确认备份文件和当前主密码匹配");
+    }
+  } finally {
+    event.target.value = "";
+  }
+}
+
 async function importBookmarksText(text) {
   try {
     const trimmed = String(text ?? "").trim();
@@ -1377,18 +1573,13 @@ async function importBookmarksText(text) {
     }
 
     if (trimmed.startsWith("{")) {
+      if (state.key) {
+        await importEncryptedBackupText(trimmed);
+        return true;
+      }
       const vault = JSON.parse(trimmed);
       if (!vault.salt || !vault.iv || !vault.content) {
         throw new Error("Invalid vault");
-      }
-      if (isDesktopVaultAvailable() && state.key) {
-        const payload = await decryptVault(vault, state.key);
-        state.records = Array.isArray(payload.records) ? payload.records : [];
-        state.selectedId = state.records[0] ? state.records[0].id : null;
-        await replaceDesktopRecords(state.records);
-        render();
-        showToast("旧版加密备份已迁移到 SQLite");
-        return true;
       }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(vault));
       showToast("旧版加密备份已导入，请用对应主密码解锁");
@@ -1781,32 +1972,29 @@ function getUrlMatchKeys(value) {
 }
 
 async function importBookmarksFromDesktop() {
-  if (!window.desktopBridge?.pickFile || !window.desktopBridge?.readTextFile) {
+  if (!window.desktopBridge?.pickAndReadTextFile) {
     els.importInput.click();
     return;
   }
 
   try {
-    const result = await window.desktopBridge.pickFile({
+    const fileResult = await window.desktopBridge.pickAndReadTextFile({
       title: "导入书签 HTML",
       filters: [
         { name: "HTML", extensions: ["html", "htm"] },
         { name: "JSON", extensions: ["json"] },
         { name: "All Files", extensions: ["*"] }
-      ]
-    });
-    if (!result || result.canceled || !result.filePaths?.length) {
-      return;
-    }
-
-    const fileResult = await window.desktopBridge.readTextFile({
-      filePath: result.filePaths[0],
+      ],
       maxBytes: MAX_BOOKMARK_HTML_BYTES
     });
-    if (!fileResult || fileResult.canceled || typeof fileResult.content !== "string") {
-      if (fileResult && fileResult.tooLarge) {
-        showToast("导入失败：书签文件太大了");
-      }
+    if (!fileResult || fileResult.canceled) {
+      return;
+    }
+    if (fileResult.tooLarge) {
+      showToast("导入失败：书签文件太大了");
+      return;
+    }
+    if (typeof fileResult.content !== "string") {
       return;
     }
 
@@ -1954,35 +2142,8 @@ function createRecordFromBookmarkItem(item, now) {
 }
 
 function createStarterRecords() {
-  const now = new Date().toISOString();
-  return [
-    {
-      id: createId(),
-      title: "GitHub",
-      url: "https://github.com",
-      username: "admin",
-      accountTag: "公司",
-      password: "Change-Me-After-Login-2026!",
-      loginMethod: "password",
-      category: "开发工具",
-      note: "示例数据：用于展示字段结构，正式使用前请删除或编辑。",
-      createdAt: now,
-      updatedAt: now
-    },
-    {
-      id: createId(),
-      title: "Gmail",
-      url: "https://mail.google.com",
-      username: "example@gmail.com",
-      accountTag: "个人",
-      password: "LocalVault#Example#18",
-      loginMethod: "password",
-      category: "个人账号",
-      note: "支持记录账号、网址、二次验证说明和恢复码位置。",
-      createdAt: now,
-      updatedAt: now
-    }
-  ];
+  // 新建真实密码库默认保持空库，避免示例账号密码混入用户数据。
+  return [];
 }
 
 function getHost(url) {
@@ -2070,6 +2231,8 @@ function bindEvents() {
   els.lockButton.addEventListener("click", lockVault);
   els.exportButton.addEventListener("click", exportBookmarksHtml);
   els.importInput.addEventListener("change", importBookmarksHtml);
+  els.exportBackupButton.addEventListener("click", exportEncryptedBackupJson);
+  els.importBackupInput.addEventListener("change", importEncryptedBackupJson);
   els.chromePasswordInput.addEventListener("change", importChromePasswordsCsv);
   els.renameCategoryButton.addEventListener("click", openRenameCategoryDialog);
   els.removeCategoryButton.addEventListener("click", openDeleteCategoryDialog);
@@ -2172,7 +2335,7 @@ function bindEvents() {
     if (!action || !record) return;
 
     if (action === "edit") openEditDialog(record);
-    if (action === "copy-password") await copyToClipboard(record.password, "密码已复制");
+    if (action === "copy-password") await copyToClipboard(record.password, "密码已复制，60 秒后自动清空", { clearPassword: true });
     if (action === "copy-username") await copyToClipboard(record.username, "用户名已复制");
     if (action === "toggle-password") {
       if (state.visiblePasswordIds.has(record.id)) {

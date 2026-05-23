@@ -130,6 +130,9 @@ function mimeToFilter(mimeType) {
   if (mimeType === "text/html") {
     return [{ name: "HTML", extensions: ["html", "htm"] }];
   }
+  if (mimeType === "application/json") {
+    return [{ name: "JSON", extensions: ["json"] }];
+  }
   return [{ name: "All Files", extensions: ["*"] }];
 }
 
@@ -139,6 +142,31 @@ function resolveSaveOptions(options = {}) {
     title: options.title || "保存文件",
     filters: mimeToFilter(options.mimeType)
   };
+}
+
+function resolveOpenOptions(options = {}) {
+  return {
+    title: options.title || "选择文件",
+    properties: ["openFile"],
+    filters: options.filters || [
+      { name: "HTML", extensions: ["html", "htm"] },
+      { name: "JSON", extensions: ["json"] },
+      { name: "CSV", extensions: ["csv"] },
+      { name: "All Files", extensions: ["*"] }
+    ]
+  };
+}
+
+async function readLimitedTextFile(filePath, maxBytes) {
+  if (typeof filePath !== "string" || !filePath.trim()) {
+    return { canceled: true };
+  }
+  const stat = await fs.stat(filePath);
+  if (typeof maxBytes === "number" && maxBytes > 0 && stat.size > maxBytes) {
+    return { canceled: false, tooLarge: true, filePath, size: stat.size };
+  }
+  const content = await fs.readFile(filePath, "utf8");
+  return { canceled: false, filePath, content, size: stat.size };
 }
 
 app.whenReady().then(() => {
@@ -164,31 +192,24 @@ app.whenReady().then(() => {
 
   ipcMain.handle("desktop:readTextFile", async (_event, options = {}) => {
     const filePath = options.filePath || options.path;
-    if (typeof filePath !== "string" || !filePath.trim()) {
-      return { canceled: true };
-    }
-    const stat = await fs.stat(filePath);
-    if (typeof options.maxBytes === "number" && options.maxBytes > 0 && stat.size > options.maxBytes) {
-      return { canceled: false, tooLarge: true, filePath, size: stat.size };
-    }
-    const content = await fs.readFile(filePath, "utf8");
-    return { canceled: false, filePath, content, size: stat.size };
+    return readLimitedTextFile(filePath, options.maxBytes);
   });
 
   ipcMain.handle("desktop:pickFile", async (_event, options = {}) => {
-    const result = await dialog.showOpenDialog(mainWindow, {
-      title: options.title || "选择文件",
-      properties: ["openFile"],
-      filters: options.filters || [
-        { name: "HTML", extensions: ["html", "htm"] },
-        { name: "JSON", extensions: ["json"] },
-        { name: "All Files", extensions: ["*"] }
-      ]
-    });
+    const result = await dialog.showOpenDialog(mainWindow, resolveOpenOptions(options));
     if (result.canceled || !result.filePaths.length) {
       return { canceled: true };
     }
     return { canceled: false, filePaths: result.filePaths };
+  });
+
+  ipcMain.handle("desktop:pickAndReadTextFile", async (_event, options = {}) => {
+    const result = await dialog.showOpenDialog(mainWindow, resolveOpenOptions(options));
+    if (result.canceled || !result.filePaths.length) {
+      return { canceled: true };
+    }
+    // 文件选择和读取都在主进程完成，renderer 不再传任意路径要求读取。
+    return readLimitedTextFile(result.filePaths[0], options.maxBytes);
   });
 
   ipcMain.handle("vault:getMeta", async () => vaultStore.getMeta(app));
@@ -197,6 +218,9 @@ app.whenReady().then(() => {
   ipcMain.handle("vault:hasRecords", async () => vaultStore.hasRecords(app));
   ipcMain.handle("vault:listRecords", async () => vaultStore.listRecords(app));
   ipcMain.handle("vault:replaceAllRecords", async (_event, records = []) => vaultStore.replaceAllRecords(app, records));
+  ipcMain.handle("vault:replaceAllRecordsWithMeta", async (_event, records = [], meta = {}) => (
+    vaultStore.replaceAllRecordsWithMeta(app, records, meta)
+  ));
   ipcMain.handle("vault:upsertRecords", async (_event, records = []) => vaultStore.upsertRecords(app, records));
   ipcMain.handle("vault:deleteRecords", async (_event, ids = []) => vaultStore.deleteRecords(app, ids));
   ipcMain.handle("vault:getSetting", async (_event, key) => vaultStore.getSetting(app, key));

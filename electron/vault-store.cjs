@@ -2,7 +2,7 @@ const path = require("path");
 const Database = require("better-sqlite3");
 
 const DB_FILE_NAME = "vault.sqlite3";
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 let db = null;
 
@@ -23,6 +23,8 @@ function initSchema(database) {
       version INTEGER NOT NULL,
       salt TEXT NOT NULL,
       iterations INTEGER NOT NULL,
+      verifierIv TEXT NOT NULL DEFAULT '',
+      verifierContent TEXT NOT NULL DEFAULT '',
       createdAt TEXT NOT NULL,
       updatedAt TEXT NOT NULL
     );
@@ -52,6 +54,18 @@ function initSchema(database) {
       updatedAt TEXT NOT NULL
     );
   `);
+
+  ensureColumn(database, "vault_meta", "verifierIv", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(database, "vault_meta", "verifierContent", "TEXT NOT NULL DEFAULT ''");
+}
+
+function ensureColumn(database, tableName, columnName, definition) {
+  const columns = database.prepare(`PRAGMA table_info(${tableName})`).all();
+  if (columns.some((column) => column.name === columnName)) {
+    return;
+  }
+  // 旧版本 SQLite 库启动时补齐 verifier 字段，避免用户手动迁移数据库。
+  database.prepare(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`).run();
 }
 
 function getMeta(app) {
@@ -68,13 +82,19 @@ function initializeVault(app, meta) {
     version: SCHEMA_VERSION,
     salt: String(meta.salt || ""),
     iterations: Number(meta.iterations || 210000),
+    verifierIv: String(meta.verifierIv || ""),
+    verifierContent: String(meta.verifierContent || ""),
     createdAt: meta.createdAt || now,
     updatedAt: meta.updatedAt || now
   };
 
   database.prepare(`
-    INSERT INTO vault_meta (id, version, salt, iterations, createdAt, updatedAt)
-    VALUES (1, @version, @salt, @iterations, @createdAt, @updatedAt)
+    INSERT INTO vault_meta (
+      id, version, salt, iterations, verifierIv, verifierContent, createdAt, updatedAt
+    )
+    VALUES (
+      1, @version, @salt, @iterations, @verifierIv, @verifierContent, @createdAt, @updatedAt
+    )
   `).run(row);
   return getMeta(app);
 }
@@ -88,11 +108,19 @@ function updateMeta(app, meta) {
 
   database.prepare(`
     UPDATE vault_meta
-    SET salt = @salt, iterations = @iterations, updatedAt = @updatedAt
+    SET version = @version,
+      salt = @salt,
+      iterations = @iterations,
+      verifierIv = @verifierIv,
+      verifierContent = @verifierContent,
+      updatedAt = @updatedAt
     WHERE id = 1
   `).run({
+    version: SCHEMA_VERSION,
     salt: String(meta.salt || existing.salt),
     iterations: Number(meta.iterations || existing.iterations),
+    verifierIv: String(meta.verifierIv || existing.verifierIv || ""),
+    verifierContent: String(meta.verifierContent || existing.verifierContent || ""),
     updatedAt: meta.updatedAt || new Date().toISOString()
   });
   return getMeta(app);
@@ -120,6 +148,23 @@ function replaceAllRecords(app, records) {
     touchMeta(database);
   });
   tx(Array.isArray(records) ? records : []);
+  return listRecords(app);
+}
+
+function replaceAllRecordsWithMeta(app, records, meta = {}) {
+  const database = getDb(app);
+  const tx = database.transaction((items, nextMeta) => {
+    const existing = getMeta(app);
+    if (!existing) {
+      throw new Error("Vault metadata not found");
+    }
+    // 主密码修改必须让 meta 和记录密文同事务落库，避免只更新其中一边。
+    updateMetaRow(database, existing, nextMeta);
+    database.prepare("DELETE FROM records").run();
+    const insert = prepareRecordUpsert(database);
+    items.forEach((record) => insert.run(normalizeRecordRow(record)));
+  });
+  tx(Array.isArray(records) ? records : [], meta);
   return listRecords(app);
 }
 
@@ -205,6 +250,26 @@ function touchMeta(database) {
   database.prepare("UPDATE vault_meta SET updatedAt = ? WHERE id = 1").run(new Date().toISOString());
 }
 
+function updateMetaRow(database, existing, meta) {
+  database.prepare(`
+    UPDATE vault_meta
+    SET version = @version,
+      salt = @salt,
+      iterations = @iterations,
+      verifierIv = @verifierIv,
+      verifierContent = @verifierContent,
+      updatedAt = @updatedAt
+    WHERE id = 1
+  `).run({
+    version: SCHEMA_VERSION,
+    salt: String(meta.salt || existing.salt),
+    iterations: Number(meta.iterations || existing.iterations),
+    verifierIv: String(meta.verifierIv || existing.verifierIv || ""),
+    verifierContent: String(meta.verifierContent || existing.verifierContent || ""),
+    updatedAt: meta.updatedAt || new Date().toISOString()
+  });
+}
+
 module.exports = {
   getMeta,
   initializeVault,
@@ -212,6 +277,7 @@ module.exports = {
   hasRecords,
   listRecords,
   replaceAllRecords,
+  replaceAllRecordsWithMeta,
   upsertRecords,
   deleteRecords,
   getSetting,
