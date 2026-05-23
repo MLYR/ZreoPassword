@@ -21,6 +21,16 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     getSetting: (key) => ipcRenderer.invoke("vault:getSetting", key),
     setSetting: (key, value) => ipcRenderer.invoke("vault:setSetting", key, value)
   },
+  drive: {
+    getStatus: () => ipcRenderer.invoke("drive:getStatus"),
+    connect: () => ipcRenderer.invoke("drive:connect"),
+    disconnect: () => ipcRenderer.invoke("drive:disconnect"),
+    getRemoteState: () => ipcRenderer.invoke("drive:getRemoteState"),
+    listBackups: () => ipcRenderer.invoke("drive:listBackups"),
+    markDownloaded: (info) => ipcRenderer.invoke("drive:markDownloaded", info),
+    uploadBackup: (content) => ipcRenderer.invoke("drive:uploadBackup", content),
+    downloadBackup: (fileId) => ipcRenderer.invoke("drive:downloadBackup", fileId)
+  },
   onAction: (callback) => {
     const handler = (_event, action) => callback(action);
     ipcRenderer.on("desktop:action", handler);

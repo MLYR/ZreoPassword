@@ -2,12 +2,14 @@ const STORAGE_KEY = "zreo-password-vault-v1";
 const SESSION_KEY = "zreo-password-session-key";
 const IDLE_LOCK_KEY = "zreo-password-idle-minutes";
 const THEME_KEY = "zreo-password-theme";
+const DRIVE_AUTO_UPLOAD_KEY = "zreo-password-drive-auto-upload";
 const DEFAULT_CATEGORY = "未分类";
 const DEFAULT_KDF_ITERATIONS = 210000;
 const MAX_BOOKMARK_HTML_BYTES = 20 * 1024 * 1024;
 const MAX_CHROME_PASSWORD_CSV_BYTES = 10 * 1024 * 1024;
 const MAX_BACKUP_JSON_BYTES = 20 * 1024 * 1024;
 const CLIPBOARD_PASSWORD_CLEAR_MS = 60 * 1000;
+const DRIVE_AUTO_UPLOAD_DELAY_MS = 8 * 1000;
 
 const state = {
   records: [],
@@ -24,6 +26,9 @@ const state = {
 };
 
 let idleTimer = null;
+let driveAutoUploadTimer = null;
+let driveAutoUploadInFlight = false;
+let suppressNextDriveAutoUpload = false;
 let sessionPassword = "";
 
 const els = {
@@ -53,6 +58,14 @@ const els = {
   importInput: document.querySelector("#importInput"),
   exportBackupButton: document.querySelector("#exportBackupButton"),
   importBackupInput: document.querySelector("#importBackupInput"),
+  driveAutoUploadInput: document.querySelector("#driveAutoUploadInput"),
+  connectDriveButton: document.querySelector("#connectDriveButton"),
+  disconnectDriveButton: document.querySelector("#disconnectDriveButton"),
+  uploadDriveButton: document.querySelector("#uploadDriveButton"),
+  downloadDriveButton: document.querySelector("#downloadDriveButton"),
+  listDriveBackupsButton: document.querySelector("#listDriveBackupsButton"),
+  driveBackupList: document.querySelector("#driveBackupList"),
+  driveSyncStatus: document.querySelector("#driveSyncStatus"),
   chromePasswordInput: document.querySelector("#chromePasswordInput"),
   searchInput: document.querySelector("#searchInput"),
   lockButton: document.querySelector("#lockButton"),
@@ -304,16 +317,19 @@ async function readDesktopRecords(rows) {
 async function saveDesktopRecords(records, key = state.key) {
   const rows = await Promise.all(records.map((record) => encryptRecordForSqlite(record, key)));
   await window.desktopBridge.vault.upsertRecords(rows);
+  scheduleDriveAutoUpload();
 }
 
 async function replaceDesktopRecords(records, key = state.key) {
   const rows = await Promise.all(records.map((record) => encryptRecordForSqlite(record, key)));
   await window.desktopBridge.vault.replaceAllRecords(rows);
+  scheduleDriveAutoUpload();
 }
 
 async function replaceDesktopRecordsWithMeta(records, meta, key = state.key) {
   const rows = await Promise.all(records.map((record) => encryptRecordForSqlite(record, key)));
   await window.desktopBridge.vault.replaceAllRecordsWithMeta(rows, meta);
+  scheduleDriveAutoUpload();
 }
 
 async function ensureDesktopVerifier(meta) {
@@ -338,6 +354,7 @@ async function persistRecords() {
   const iterations = normalizeIterations(existing?.iterations);
   const vault = await encryptVault(state.records, state.key, salt, iterations);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(vault));
+  scheduleDriveAutoUpload();
 }
 
 async function unlockWithPassword(password, options = {}) {
@@ -1403,6 +1420,9 @@ function resetIdleTimer() {
 
 function lockVault() {
   stopIdleTimer();
+  clearTimeout(driveAutoUploadTimer);
+  driveAutoUploadInFlight = false;
+  suppressNextDriveAutoUpload = false;
   state.key = null;
   state.records = [];
   state.selectedId = null;
@@ -1424,6 +1444,8 @@ function openSettingsDialog() {
   els.currentMasterPasswordInput.value = "";
   els.newMasterPasswordInput.value = "";
   els.confirmNewMasterPasswordInput.value = "";
+  hydrateDriveAutoUploadSetting();
+  refreshDriveStatus();
   applyTheme(localStorage.getItem(THEME_KEY) || document.documentElement.dataset.theme);
   els.settingsDialog.showModal();
 }
@@ -1473,20 +1495,7 @@ async function exportEncryptedBackupJson() {
       return;
     }
 
-    let salt;
-    let iterations = DEFAULT_KDF_ITERATIONS;
-    if (isDesktopVaultAvailable()) {
-      const meta = await window.desktopBridge.vault.getMeta();
-      salt = base64ToBytes(meta.salt);
-      iterations = normalizeIterations(meta.iterations);
-    } else {
-      const existing = getStoredVault();
-      salt = existing ? base64ToBytes(existing.salt) : crypto.getRandomValues(new Uint8Array(16));
-      iterations = normalizeIterations(existing?.iterations);
-    }
-
-    const backup = await encryptVault(state.records, state.key, salt, iterations);
-    const content = `${JSON.stringify(backup, null, 2)}\n`;
+    const content = await createEncryptedBackupContent();
     const fileName = `zreo-password-backup-${new Date().toISOString().slice(0, 10)}.json`;
     if (window.desktopBridge?.saveTextFile) {
       const result = await window.desktopBridge.saveTextFile({
@@ -1514,6 +1523,350 @@ async function exportEncryptedBackupJson() {
   }
 }
 
+async function createEncryptedBackupContent() {
+  let salt;
+  let iterations = DEFAULT_KDF_ITERATIONS;
+  if (isDesktopVaultAvailable()) {
+    const meta = await window.desktopBridge.vault.getMeta();
+    salt = base64ToBytes(meta.salt);
+    iterations = normalizeIterations(meta.iterations);
+  } else {
+    const existing = getStoredVault();
+    salt = existing ? base64ToBytes(existing.salt) : crypto.getRandomValues(new Uint8Array(16));
+    iterations = normalizeIterations(existing?.iterations);
+  }
+
+  const backup = await encryptVault(state.records, state.key, salt, iterations);
+  return `${JSON.stringify(backup, null, 2)}\n`;
+}
+
+async function getLocalVaultUpdatedAt() {
+  if (isDesktopVaultAvailable()) {
+    const meta = await window.desktopBridge.vault.getMeta();
+    return meta?.updatedAt || "";
+  }
+  return getStoredVault()?.updatedAt || "";
+}
+
+function isAfter(value, baseline) {
+  if (!value || !baseline) return false;
+  const time = new Date(value).getTime();
+  const baseTime = new Date(baseline).getTime();
+  return Number.isFinite(time) && Number.isFinite(baseTime) && time > baseTime + 1000;
+}
+
+async function isDriveAutoUploadEnabled() {
+  if (isDesktopVaultAvailable()) {
+    return (await window.desktopBridge.vault.getSetting(DRIVE_AUTO_UPLOAD_KEY)) === "1";
+  }
+  return localStorage.getItem(DRIVE_AUTO_UPLOAD_KEY) === "1";
+}
+
+async function setDriveAutoUploadEnabled(enabled) {
+  const value = enabled ? "1" : "0";
+  if (isDesktopVaultAvailable()) {
+    await window.desktopBridge.vault.setSetting(DRIVE_AUTO_UPLOAD_KEY, value);
+  } else {
+    localStorage.setItem(DRIVE_AUTO_UPLOAD_KEY, value);
+  }
+}
+
+async function hydrateDriveAutoUploadSetting() {
+  if (!els.driveAutoUploadInput) return;
+  els.driveAutoUploadInput.checked = await isDriveAutoUploadEnabled();
+}
+
+function scheduleDriveAutoUpload() {
+  if (!state.key || !window.desktopBridge?.drive) return;
+  if (suppressNextDriveAutoUpload) {
+    suppressNextDriveAutoUpload = false;
+    return;
+  }
+  clearTimeout(driveAutoUploadTimer);
+  driveAutoUploadTimer = setTimeout(() => {
+    runDriveAutoUpload();
+  }, DRIVE_AUTO_UPLOAD_DELAY_MS);
+}
+
+async function runDriveAutoUpload() {
+  if (driveAutoUploadInFlight || !state.key || !window.desktopBridge?.drive) return;
+  if (!(await isDriveAutoUploadEnabled())) return;
+
+  driveAutoUploadInFlight = true;
+  try {
+    const status = await window.desktopBridge.drive.getStatus();
+    if (!status.configured || !status.connected) return;
+    const remoteModifiedTime = status.remote?.modifiedTime || "";
+    const lastKnownRemote = status.sync?.remoteModifiedTime || "";
+    if (status.remote?.exists && (!lastKnownRemote || isAfter(remoteModifiedTime, lastKnownRemote))) {
+      setDriveStatus("自动上传已暂停：云端备份可能有新版本，请手动确认上传或恢复。");
+      showToast("Drive 自动上传已暂停，请手动处理云端版本");
+      return;
+    }
+
+    setDriveStatus("正在自动上传加密备份到 Google Drive...");
+    const content = await createEncryptedBackupContent();
+    const result = await window.desktopBridge.drive.uploadBackup(content);
+    if (!result.ok) {
+      setDriveStatus(result.message || "自动上传失败");
+      return;
+    }
+    await refreshDriveStatus();
+  } catch (error) {
+    console.error(error);
+    setDriveStatus("自动上传失败，请检查 Google Drive 连接。");
+  } finally {
+    driveAutoUploadInFlight = false;
+  }
+}
+
+async function confirmDriveUploadOverwrite() {
+  if (!window.desktopBridge?.drive?.getStatus) return true;
+  const status = await window.desktopBridge.drive.getStatus();
+  const remoteModifiedTime = status.remote?.modifiedTime || "";
+  const lastKnownRemote = status.sync?.remoteModifiedTime || "";
+  if (!status.remote?.exists) {
+    return true;
+  }
+  if (!lastKnownRemote) {
+    return window.confirm(
+      `Google Drive 已有一份云端备份${remoteModifiedTime ? `，更新时间 ${formatFullDate(remoteModifiedTime)}` : ""}。\n继续上传会覆盖这份云端备份，确认继续？`
+    );
+  }
+  if (!isAfter(remoteModifiedTime, lastKnownRemote)) return true;
+  return window.confirm(
+    `云端备份在 ${formatFullDate(remoteModifiedTime)} 更新过，可能来自另一台设备。\n继续上传会覆盖云端备份，确认继续？`
+  );
+}
+
+async function confirmDriveDownloadOverwrite() {
+  if (!window.desktopBridge?.drive?.getStatus) return true;
+  const status = await window.desktopBridge.drive.getStatus();
+  const localUpdatedAt = await getLocalVaultUpdatedAt();
+  const lastDownloadAt = status.sync?.lastDownloadAt || status.sync?.lastUploadAt || "";
+  if (!isAfter(localUpdatedAt, lastDownloadAt)) {
+    return true;
+  }
+  return window.confirm(
+    `本地密码库在 ${formatFullDate(localUpdatedAt)} 修改过。\n从 Google Drive 恢复会覆盖这些本地改动，确认继续？`
+  );
+}
+
+function setDriveStatus(message) {
+  if (els.driveSyncStatus) {
+    els.driveSyncStatus.textContent = message;
+  }
+}
+
+function setDriveConnectionButtons(connected) {
+  if (els.connectDriveButton) {
+    els.connectDriveButton.hidden = connected;
+  }
+  if (els.disconnectDriveButton) {
+    els.disconnectDriveButton.hidden = !connected;
+  }
+}
+
+async function refreshDriveStatus() {
+  if (!window.desktopBridge?.drive) {
+    setDriveConnectionButtons(false);
+    setDriveStatus("Google Drive 同步仅桌面端可用。");
+    return;
+  }
+  const status = await window.desktopBridge.drive.getStatus();
+  if (!status.configured) {
+    setDriveConnectionButtons(false);
+    setDriveStatus("Google Drive OAuth 未配置，请在项目配置中内置 Client ID 和 Client Secret。");
+    return;
+  }
+  if (!status.connected) {
+    setDriveConnectionButtons(false);
+    setDriveStatus("Google Drive 未连接；点击连接后使用 appDataFolder 保存加密备份。");
+    return;
+  }
+  setDriveConnectionButtons(true);
+  const syncParts = [];
+  if (status.sync?.lastUploadAt) syncParts.push(`上次上传 ${formatFullDate(status.sync.lastUploadAt)}`);
+  if (status.sync?.lastDownloadAt) syncParts.push(`上次恢复 ${formatFullDate(status.sync.lastDownloadAt)}`);
+  if (status.remote?.exists && status.remote.modifiedTime) {
+    syncParts.push(`云端更新 ${formatFullDate(status.remote.modifiedTime)}`);
+  } else if (status.remote?.exists === false) {
+    syncParts.push("云端暂无备份");
+  }
+  setDriveStatus(syncParts.length
+    ? `Google Drive 已连接；${syncParts.join("；")}。`
+    : "Google Drive 已连接；可上传或恢复加密备份。");
+}
+
+async function connectGoogleDrive() {
+  if (!window.desktopBridge?.drive) {
+    showToast("Google Drive 同步仅桌面端可用");
+    return;
+  }
+  try {
+    setDriveStatus("正在打开 Google 授权页面...");
+    const result = await window.desktopBridge.drive.connect();
+    if (!result.ok) {
+      setDriveStatus(result.message || "Google Drive 连接失败");
+      showToast(result.message || "Google Drive 连接失败");
+      return;
+    }
+    await refreshDriveStatus();
+    showToast("Google Drive 已连接");
+  } catch (error) {
+    console.error(error);
+    setDriveStatus(`Google Drive 连接失败：${error.message || "请检查 OAuth 配置。"}`);
+    showToast("Google Drive 连接失败");
+  }
+}
+
+async function disconnectGoogleDrive() {
+  if (!window.desktopBridge?.drive?.disconnect) {
+    showToast("当前版本不支持断开 Google Drive");
+    return;
+  }
+  const confirmed = window.confirm("断开后需要重新授权 Google Drive，确认继续？");
+  if (!confirmed) return;
+
+  try {
+    const result = await window.desktopBridge.drive.disconnect();
+    if (!result.ok) {
+      setDriveStatus(result.message || "断开连接失败");
+      showToast(result.message || "断开连接失败");
+      return;
+    }
+    await refreshDriveStatus();
+    showToast("已断开 Google Drive");
+  } catch (error) {
+    console.error(error);
+    setDriveStatus("断开连接失败，请稍后重试。");
+    showToast("断开 Google Drive 失败");
+  }
+}
+
+async function uploadGoogleDriveBackup() {
+  if (!window.desktopBridge?.drive) {
+    showToast("Google Drive 同步仅桌面端可用");
+    return;
+  }
+  if (!state.key) {
+    showToast("请先解锁密码库");
+    return;
+  }
+  try {
+    const canUpload = await confirmDriveUploadOverwrite();
+    if (!canUpload) return;
+
+    setDriveStatus("正在生成加密备份并上传...");
+    const content = await createEncryptedBackupContent();
+    const result = await window.desktopBridge.drive.uploadBackup(content);
+    if (!result.ok) {
+      setDriveStatus(result.message || "上传失败");
+      showToast(result.message || "上传失败");
+      return;
+    }
+    clearTimeout(driveAutoUploadTimer);
+    await refreshDriveStatus();
+    showToast("已上传到 Google Drive");
+  } catch (error) {
+    console.error(error);
+    setDriveStatus("上传失败，请先连接 Google Drive。");
+    showToast("上传 Google Drive 失败");
+  }
+}
+
+async function downloadGoogleDriveBackup(fileId = "") {
+  if (!window.desktopBridge?.drive) {
+    showToast("Google Drive 同步仅桌面端可用");
+    return;
+  }
+  if (!state.key) {
+    showToast("请先解锁密码库");
+    return;
+  }
+  const confirmed = window.confirm("从 Google Drive 恢复会覆盖当前本地密码库，确认继续？");
+  if (!confirmed) return;
+
+  try {
+    const canDownload = await confirmDriveDownloadOverwrite();
+    if (!canDownload) return;
+
+    setDriveStatus("正在从 Google Drive 下载加密备份...");
+    const result = await window.desktopBridge.drive.downloadBackup(fileId);
+    if (!result.ok) {
+      setDriveStatus(result.message || "没有找到 Google Drive 备份");
+      showToast(result.message || "没有找到 Google Drive 备份");
+      return;
+    }
+    await importEncryptedBackupText(result.content);
+    if (window.desktopBridge?.drive?.markDownloaded) {
+      await window.desktopBridge.drive.markDownloaded({
+        fileId: result.fileId,
+        remoteModifiedTime: result.remoteModifiedTime
+      });
+    }
+    await refreshDriveStatus();
+  } catch (error) {
+    console.error(error);
+    setDriveStatus("恢复失败，请确认备份和当前主密码匹配。");
+    showToast("从 Google Drive 恢复失败");
+  }
+}
+
+async function listGoogleDriveBackups() {
+  if (!window.desktopBridge?.drive?.listBackups) {
+    showToast("Google Drive 备份列表仅桌面端可用");
+    return;
+  }
+  try {
+    setDriveBackupListLoading("正在读取云端备份...");
+    const result = await window.desktopBridge.drive.listBackups();
+    if (!result.ok) {
+      setDriveBackupListLoading(result.message || "读取云端备份失败");
+      showToast(result.message || "读取云端备份失败");
+      return;
+    }
+    renderDriveBackupList(result.files || []);
+  } catch (error) {
+    console.error(error);
+    setDriveBackupListLoading("读取云端备份失败，请先连接 Google Drive。");
+    showToast("读取 Google Drive 备份失败");
+  }
+}
+
+function setDriveBackupListLoading(message) {
+  if (!els.driveBackupList) return;
+  els.driveBackupList.hidden = false;
+  els.driveBackupList.innerHTML = `<p class="settings-note">${escapeHtml(message)}</p>`;
+}
+
+function renderDriveBackupList(files) {
+  if (!els.driveBackupList) return;
+  els.driveBackupList.hidden = false;
+  if (!files.length) {
+    els.driveBackupList.innerHTML = `<p class="settings-note">云端暂无备份文件。</p>`;
+    return;
+  }
+
+  els.driveBackupList.innerHTML = files.map((file) => `
+    <div class="drive-backup-item">
+      <div>
+        <strong>${escapeHtml(file.name || "未命名备份")}</strong>
+        <span>${escapeHtml(formatDriveBackupMeta(file))}</span>
+      </div>
+      <button class="ghost-button drive-backup-restore" type="button" data-drive-backup-id="${escapeHtml(file.id || "")}">恢复</button>
+    </div>
+  `).join("");
+}
+
+function formatDriveBackupMeta(file) {
+  const parts = [];
+  if (file.modifiedTime) parts.push(`更新 ${formatFullDate(file.modifiedTime)}`);
+  if (file.createdTime) parts.push(`创建 ${formatFullDate(file.createdTime)}`);
+  if (file.size) parts.push(formatFileSize(file.size));
+  return parts.join(" · ") || "无文件信息";
+}
+
 async function decryptImportedVault(vault) {
   if (!vault.salt || !vault.iv || !vault.content) {
     throw new Error("Invalid vault");
@@ -1532,6 +1885,7 @@ async function importEncryptedBackupText(text) {
   state.visiblePasswordIds.clear();
   state.selectedRecordIds.clear();
   state.isBatchDeleteMode = false;
+  suppressNextDriveAutoUpload = true;
   if (isDesktopVaultAvailable()) {
     await replaceDesktopRecords(state.records);
   } else {
@@ -2164,6 +2518,25 @@ function formatDate(value) {
   }).format(new Date(value));
 }
 
+function formatFullDate(value) {
+  if (!value) return "未知";
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(new Date(value));
+}
+
+function formatFileSize(value) {
+  const size = Number(value);
+  if (!Number.isFinite(size) || size <= 0) return "";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
 function escapeHtml(value) {
   // 所有用户输入渲染前都转义，降低备注和标题里的 XSS 风险。
   return String(value ?? "")
@@ -2220,6 +2593,13 @@ function bindEvents() {
       if (state.key) startIdleTimer();
     });
   }
+  if (els.driveAutoUploadInput) {
+    els.driveAutoUploadInput.addEventListener("change", async () => {
+      await setDriveAutoUploadEnabled(els.driveAutoUploadInput.checked);
+      showToast(els.driveAutoUploadInput.checked ? "已开启 Drive 自动上传" : "已关闭 Drive 自动上传");
+      if (els.driveAutoUploadInput.checked) scheduleDriveAutoUpload();
+    });
+  }
   [els.themeDarkInput, els.themeLightInput].forEach((input) => {
     if (!input) return;
     input.addEventListener("change", () => {
@@ -2234,6 +2614,18 @@ function bindEvents() {
   els.exportBackupButton.addEventListener("click", exportEncryptedBackupJson);
   els.importBackupInput.addEventListener("change", importEncryptedBackupJson);
   els.chromePasswordInput.addEventListener("change", importChromePasswordsCsv);
+  if (els.connectDriveButton) els.connectDriveButton.addEventListener("click", connectGoogleDrive);
+  if (els.disconnectDriveButton) els.disconnectDriveButton.addEventListener("click", disconnectGoogleDrive);
+  if (els.uploadDriveButton) els.uploadDriveButton.addEventListener("click", uploadGoogleDriveBackup);
+  if (els.downloadDriveButton) els.downloadDriveButton.addEventListener("click", () => downloadGoogleDriveBackup());
+  if (els.listDriveBackupsButton) els.listDriveBackupsButton.addEventListener("click", listGoogleDriveBackups);
+  if (els.driveBackupList) {
+    els.driveBackupList.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-drive-backup-id]");
+      if (!button) return;
+      downloadGoogleDriveBackup(button.dataset.driveBackupId || "");
+    });
+  }
   els.renameCategoryButton.addEventListener("click", openRenameCategoryDialog);
   els.removeCategoryButton.addEventListener("click", openDeleteCategoryDialog);
   els.renameCategoryForm.addEventListener("submit", saveCategoryRename);

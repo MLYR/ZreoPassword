@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, dialog, shell, ipcMain } = require("electron")
 const path = require("path");
 const fs = require("fs/promises");
 const vaultStore = require("./vault-store.cjs");
+const driveSync = require("./drive-sync.cjs");
 
 const isDev = Boolean(process.env.ELECTRON_START_URL);
 
@@ -225,6 +226,14 @@ app.whenReady().then(() => {
   ipcMain.handle("vault:deleteRecords", async (_event, ids = []) => vaultStore.deleteRecords(app, ids));
   ipcMain.handle("vault:getSetting", async (_event, key) => vaultStore.getSetting(app, key));
   ipcMain.handle("vault:setSetting", async (_event, key, value) => vaultStore.setSetting(app, key, value));
+  ipcMain.handle("drive:getStatus", async () => driveSync.getStatus(app));
+  ipcMain.handle("drive:connect", async () => driveSync.connect(app, shell));
+  ipcMain.handle("drive:disconnect", async () => driveSync.disconnect(app));
+  ipcMain.handle("drive:getRemoteState", async () => driveSync.getRemoteState(app));
+  ipcMain.handle("drive:listBackups", async () => driveSync.listBackups(app));
+  ipcMain.handle("drive:markDownloaded", async (_event, info = {}) => driveSync.markDownloaded(app, info));
+  ipcMain.handle("drive:uploadBackup", async (_event, content) => driveSync.uploadBackup(app, String(content || "")));
+  ipcMain.handle("drive:downloadBackup", async (_event, fileId = "") => driveSync.downloadBackup(app, String(fileId || "")));
 
   createWindow();
 });

@@ -245,6 +245,23 @@
       </section>
 
       <section class="settings-section">
+        <h4>Google Drive 同步</h4>
+        <label class="settings-checkbox">
+          <input id="driveAutoUploadInput" type="checkbox">
+          <span>本地修改后自动上传加密备份</span>
+        </label>
+        <div class="settings-actions">
+          <button class="ghost-button" id="connectDriveButton" type="button">连接 Google Drive</button>
+          <button class="ghost-button" id="disconnectDriveButton" type="button" hidden>断开连接</button>
+          <button class="ghost-button" id="uploadDriveButton" type="button">上传到 Drive</button>
+          <button class="ghost-button" id="downloadDriveButton" type="button">从 Drive 恢复</button>
+          <button class="ghost-button" id="listDriveBackupsButton" type="button">查看云端备份</button>
+        </div>
+        <div class="drive-backup-list" id="driveBackupList" hidden></div>
+        <p class="settings-note" id="driveSyncStatus">使用 Google Drive appDataFolder 保存加密备份，不会上传明文密码。</p>
+      </section>
+
+      <section class="settings-section">
         <h4>外观主题</h4>
         <div class="theme-toggle" role="radiogroup" aria-label="外观主题">
           <label class="theme-option">

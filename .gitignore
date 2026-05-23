@@ -6,3 +6,4 @@ out
 pnpm-lock.yaml
 yarn.lock
 .idea
+electron/google-oauth-private.cjs

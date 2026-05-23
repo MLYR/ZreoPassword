@@ -1230,10 +1230,77 @@ select:focus {
   font-weight: 820;
 }
 
+.settings-field {
+  display: grid;
+  gap: 8px;
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.settings-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 760;
+}
+
+.settings-checkbox input {
+  width: 18px;
+  min-height: 18px;
+}
+
 .settings-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   gap: 12px;
+}
+
+.drive-backup-list {
+  display: grid;
+  gap: 10px;
+}
+
+.drive-backup-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  background: var(--card-bg);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+}
+
+.drive-backup-item strong,
+.drive-backup-item span {
+  display: block;
+}
+
+.drive-backup-item strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 820;
+}
+
+.drive-backup-item span,
+.drive-backup-item code {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.drive-backup-item code {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drive-backup-restore {
+  min-height: 34px;
+  padding: 0 14px;
 }
 
 .theme-toggle {
