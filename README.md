@@ -183,18 +183,18 @@ https://www.googleapis.com/auth/drive.appdata
 同步文件名：
 
 ```text
-zreo-password-backup.json
+zreo-password-backup-YYYY-MM-DD-HHmmss.json
 ```
 
 说明：
 
-- 上传时会用当前主密码生成加密备份后写入 Google Drive。
+- 上传时会用当前主密码生成加密备份后写入 Google Drive，每次上传都会新建一个带日期时间的备份文件，不覆盖旧备份。
 - 恢复时会下载 Google Drive 中的加密备份，并用当前会话主密码解密。
 - 如果当前主密码和备份不匹配，恢复会失败。
 - Google OAuth Client ID 和 Client Secret 由应用配置提供；普通用户只需要点击连接并登录自己的 Google 账号。
 - Google Drive 登录 token 会保存在 Electron 用户数据目录，重启应用后仍可继续同步。
 - 上传 / 恢复成功后会记录本地同步状态，设置页会显示上次上传、上次恢复和云端更新时间。
-- 设置页可以查看当前 Google 账号 `appDataFolder` 下的云端备份文件列表，并从指定备份恢复。
+- 设置页可以查看当前 Google 账号 `appDataFolder` 下的云端备份文件列表，并从指定备份恢复或删除指定云端备份。
 - 当前是手动同步：上传前如果发现云端备份可能更新过，会先确认；恢复前如果发现本地库有新改动，也会先确认。
 - 可在设置页开启“本地修改后自动上传加密备份”。该开关默认关闭；开启后本地保存会延迟上传，短时间多次修改只上传一次。
 - 自动上传发现云端备份可能有新版本时会暂停，并提示用户手动确认，避免静默覆盖另一台设备的备份。

@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     getStatus: () => ipcRenderer.invoke("drive:getStatus"),
     connect: () => ipcRenderer.invoke("drive:connect"),
     disconnect: () => ipcRenderer.invoke("drive:disconnect"),
+    deleteBackup: (fileId) => ipcRenderer.invoke("drive:deleteBackup", fileId),
     getRemoteState: () => ipcRenderer.invoke("drive:getRemoteState"),
     listBackups: () => ipcRenderer.invoke("drive:listBackups"),
     markDownloaded: (info) => ipcRenderer.invoke("drive:markDownloaded", info),

@@ -1834,6 +1834,29 @@ async function listGoogleDriveBackups() {
   }
 }
 
+async function deleteGoogleDriveBackup(fileId, fileName) {
+  if (!window.desktopBridge?.drive?.deleteBackup) {
+    showToast("当前版本不支持删除云端备份");
+    return;
+  }
+  const confirmed = window.confirm(`确认删除云端备份「${fileName || "未命名备份"}」？`);
+  if (!confirmed) return;
+
+  try {
+    const result = await window.desktopBridge.drive.deleteBackup(fileId);
+    if (!result.ok) {
+      showToast(result.message || "删除云端备份失败");
+      return;
+    }
+    showToast("已删除云端备份");
+    await listGoogleDriveBackups();
+    await refreshDriveStatus();
+  } catch (error) {
+    console.error(error);
+    showToast("删除 Google Drive 备份失败");
+  }
+}
+
 function setDriveBackupListLoading(message) {
   if (!els.driveBackupList) return;
   els.driveBackupList.hidden = false;
@@ -1854,7 +1877,10 @@ function renderDriveBackupList(files) {
         <strong>${escapeHtml(file.name || "未命名备份")}</strong>
         <span>${escapeHtml(formatDriveBackupMeta(file))}</span>
       </div>
-      <button class="ghost-button drive-backup-restore" type="button" data-drive-backup-id="${escapeHtml(file.id || "")}">恢复</button>
+      <div class="drive-backup-actions">
+        <button class="ghost-button drive-backup-restore" type="button" data-drive-backup-id="${escapeHtml(file.id || "")}">恢复</button>
+        <button class="ghost-button drive-backup-delete" type="button" data-drive-delete-id="${escapeHtml(file.id || "")}" data-drive-delete-name="${escapeHtml(file.name || "未命名备份")}">删除</button>
+      </div>
     </div>
   `).join("");
 }
@@ -2621,9 +2647,15 @@ function bindEvents() {
   if (els.listDriveBackupsButton) els.listDriveBackupsButton.addEventListener("click", listGoogleDriveBackups);
   if (els.driveBackupList) {
     els.driveBackupList.addEventListener("click", (event) => {
-      const button = event.target.closest("[data-drive-backup-id]");
-      if (!button) return;
-      downloadGoogleDriveBackup(button.dataset.driveBackupId || "");
+      const restoreButton = event.target.closest("[data-drive-backup-id]");
+      if (restoreButton) {
+        downloadGoogleDriveBackup(restoreButton.dataset.driveBackupId || "");
+        return;
+      }
+      const deleteButton = event.target.closest("[data-drive-delete-id]");
+      if (deleteButton) {
+        deleteGoogleDriveBackup(deleteButton.dataset.driveDeleteId || "", deleteButton.dataset.driveDeleteName || "");
+      }
     });
   }
   els.renameCategoryButton.addEventListener("click", openRenameCategoryDialog);

@@ -229,6 +229,7 @@ app.whenReady().then(() => {
   ipcMain.handle("drive:getStatus", async () => driveSync.getStatus(app));
   ipcMain.handle("drive:connect", async () => driveSync.connect(app, shell));
   ipcMain.handle("drive:disconnect", async () => driveSync.disconnect(app));
+  ipcMain.handle("drive:deleteBackup", async (_event, fileId) => driveSync.deleteBackup(app, String(fileId || "")));
   ipcMain.handle("drive:getRemoteState", async () => driveSync.getRemoteState(app));
   ipcMain.handle("drive:listBackups", async () => driveSync.listBackups(app));
   ipcMain.handle("drive:markDownloaded", async (_event, info = {}) => driveSync.markDownloaded(app, info));

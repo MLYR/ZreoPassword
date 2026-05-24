@@ -1,7 +1,8 @@
 const http = require("http");
 const crypto = require("crypto");
 
-const DRIVE_FILE_NAME = "zreo-password-backup.json";
+const DRIVE_FILE_PREFIX = "zreo-password-backup";
+const LEGACY_DRIVE_FILE_NAME = "zreo-password-backup.json";
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -111,17 +112,7 @@ async function disconnect(app) {
 
 async function uploadBackup(app, content) {
   const accessToken = await getAccessToken(app);
-  const existing = await findBackupFile(accessToken);
-  if (existing) {
-    const updated = await updateFile(accessToken, existing.id, content);
-    await saveSyncState(app, {
-      fileId: existing.id,
-      lastUploadAt: new Date().toISOString(),
-      remoteModifiedTime: updated.modifiedTime || existing.modifiedTime || ""
-    });
-    return { ok: true, fileId: existing.id, action: "updated", sync: syncState };
-  }
-  const created = await createFile(accessToken, content);
+  const created = await createFile(accessToken, content, createBackupFileName());
   await saveSyncState(app, {
     fileId: created.id,
     lastUploadAt: new Date().toISOString(),
@@ -135,6 +126,9 @@ async function downloadBackup(app, fileId = "") {
   const existing = fileId ? await getFileMetadata(accessToken, fileId) : await findBackupFile(accessToken);
   if (!existing) {
     return { ok: false, reason: "not-found", message: "Google Drive 中没有找到同步备份。" };
+  }
+  if (!isBackupFile(existing)) {
+    return { ok: false, reason: "not-backup", message: "选择的文件不是小〇密码备份。" };
   }
   const response = await fetchWithTimeout(`${DRIVE_FILES_URL}/${existing.id}?alt=media`, {
     headers: { Authorization: `Bearer ${accessToken}` }
@@ -174,20 +168,10 @@ async function getRemoteState(app) {
 
 async function listBackups(app) {
   const accessToken = await getAccessToken(app);
-  const url = new URL(DRIVE_FILES_URL);
-  url.searchParams.set("spaces", "appDataFolder");
-  url.searchParams.set("fields", "files(id,name,mimeType,size,createdTime,modifiedTime)");
-  url.searchParams.set("q", "'appDataFolder' in parents and trashed=false");
-  url.searchParams.set("orderBy", "modifiedTime desc");
-  const response = await fetchWithTimeout(url, {
-    headers: { Authorization: `Bearer ${accessToken}` }
-  });
-  await assertOk(response, "查询 Google Drive 备份列表失败");
-  const data = await response.json();
-  const files = Array.isArray(data.files) ? data.files : [];
+  const files = await listBackupFiles(accessToken);
   return {
     ok: true,
-    files: files.map((file) => ({
+    files: files.filter(isBackupFile).map((file) => ({
       id: String(file.id || ""),
       name: String(file.name || ""),
       mimeType: String(file.mimeType || ""),
@@ -196,6 +180,20 @@ async function listBackups(app) {
       modifiedTime: String(file.modifiedTime || "")
     }))
   };
+}
+
+async function deleteBackup(app, fileId) {
+  const accessToken = await getAccessToken(app);
+  const target = await getFileMetadata(accessToken, fileId);
+  if (!target || !isBackupFile(target)) {
+    return { ok: false, reason: "not-found", message: "没有找到可删除的 Google Drive 备份。" };
+  }
+  const response = await fetchWithTimeout(`${DRIVE_FILES_URL}/${encodeURIComponent(fileId)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+  await assertOk(response, "删除 Google Drive 备份失败");
+  return { ok: true, fileId };
 }
 
 async function getAccessToken(app) {
@@ -215,35 +213,36 @@ async function getAccessToken(app) {
 }
 
 async function findBackupFile(accessToken) {
-  const query = [
-    `name='${DRIVE_FILE_NAME}'`,
-    "'appDataFolder' in parents",
-    "trashed=false"
-  ].join(" and ");
+  const files = await listBackupFiles(accessToken);
+  return files.find(isBackupFile) || null;
+}
+
+async function listBackupFiles(accessToken) {
   const url = new URL(DRIVE_FILES_URL);
   url.searchParams.set("spaces", "appDataFolder");
-  url.searchParams.set("fields", "files(id,name,modifiedTime)");
-  url.searchParams.set("q", query);
+  url.searchParams.set("fields", "files(id,name,mimeType,size,createdTime,modifiedTime)");
+  url.searchParams.set("q", "'appDataFolder' in parents and trashed=false");
+  url.searchParams.set("orderBy", "modifiedTime desc");
   const response = await fetchWithTimeout(url, {
     headers: { Authorization: `Bearer ${accessToken}` }
   });
-  await assertOk(response, "查询 Google Drive 备份失败");
+  await assertOk(response, "查询 Google Drive 备份列表失败");
   const data = await response.json();
-  return Array.isArray(data.files) && data.files.length ? data.files[0] : null;
+  return Array.isArray(data.files) ? data.files : [];
 }
 
 async function getFileMetadata(accessToken, fileId) {
-  const response = await fetchWithTimeout(`${DRIVE_FILES_URL}/${encodeURIComponent(fileId)}?fields=id,name,modifiedTime`, {
+  const response = await fetchWithTimeout(`${DRIVE_FILES_URL}/${encodeURIComponent(fileId)}?fields=id,name,mimeType,size,createdTime,modifiedTime`, {
     headers: { Authorization: `Bearer ${accessToken}` }
   });
   await assertOk(response, "查询 Google Drive 备份信息失败");
   return response.json();
 }
 
-async function createFile(accessToken, content) {
+async function createFile(accessToken, content, fileName) {
   const boundary = `zreo-${crypto.randomBytes(12).toString("hex")}`;
   const metadata = {
-    name: DRIVE_FILE_NAME,
+    name: fileName,
     parents: ["appDataFolder"],
     mimeType: "application/json"
   };
@@ -258,6 +257,27 @@ async function createFile(accessToken, content) {
   });
   await assertOk(response, "创建 Google Drive 备份失败");
   return response.json();
+}
+
+function createBackupFileName(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, "0");
+  const stamp = [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate())
+  ].join("-") + "-" + [
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds())
+  ].join("");
+  return `${DRIVE_FILE_PREFIX}-${stamp}.json`;
+}
+
+function isBackupFile(file) {
+  const name = String(file?.name || "");
+  return name === LEGACY_DRIVE_FILE_NAME || (
+    name.startsWith(`${DRIVE_FILE_PREFIX}-`) && name.endsWith(".json")
+  );
 }
 
 async function updateFile(accessToken, fileId, content) {
@@ -526,6 +546,7 @@ module.exports = {
   getStatus,
   connect,
   disconnect,
+  deleteBackup,
   getRemoteState,
   listBackups,
   markDownloaded,

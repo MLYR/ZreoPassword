@@ -1298,9 +1298,21 @@ select:focus {
   white-space: nowrap;
 }
 
-.drive-backup-restore {
+.drive-backup-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.drive-backup-restore,
+.drive-backup-delete {
   min-height: 34px;
   padding: 0 14px;
+}
+
+.drive-backup-delete {
+  color: var(--danger);
 }
 
 .theme-toggle {
